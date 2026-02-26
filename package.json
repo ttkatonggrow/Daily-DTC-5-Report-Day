@@ -1,0 +1,20 @@
+{
+  "name": "dtc-daily-report-automation",
+  "version": "3.3.0",
+  "description": "Daily Report Download (CSV & New PDF Logic)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0",
+    "nodemailer": "^6.9.7",
+    "exceljs": "^4.4.0",
+    "jsdom": "^24.0.0",
+    "archiver": "^7.0.0",
+    "csv-parse": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
