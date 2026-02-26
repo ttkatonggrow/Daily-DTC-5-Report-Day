@@ -1,0 +1,53 @@
+name: Run Daily DTC Report (18:05 PM)
+
+on:
+  schedule:
+     # 18:05 เวลาไทย (UTC+7) = 11:05 UTC
+    - cron: '5 11 * * *'
+
+  workflow_dispatch: # ปุ่มกดรันเองสำหรับทดสอบ
+
+jobs:
+  run-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60 # ปรับเพิ่มเป็น 60 นาที เผื่อเวลารอโหลดรายงานยาวๆ
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run Automation Script
+        env:
+          DTC_USERNAME: ${{ secrets.DTC_USERNAME }}
+          DTC_PASSWORD: ${{ secrets.DTC_PASSWORD }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: node index.js
+
+      - name: Upload Artifacts (Reports)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-reports
+          path: downloads/
+          retention-days: 1
+
+      - name: Upload Debug Screenshots
+        if: always() # ทำงานเสมอ ไม่ว่าจะ Success หรือ Failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: |
+            downloads/*.png
+            *.png
+          if-no-files-found: ignore
+          retention-days: 1
