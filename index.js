@@ -1,10 +1,11 @@
 /**
  * DTC Automation Script
  * Base Version: 3.4.0
- * Update: Added Vehicle Data Validation + Fast Wait (Anti-Hang)
+ * Update: Added Vehicle Data Validation + Fast Wait + Timing Fix
  * Changes:
- * - Replaced Hard Waits (3-5 mins) with `checkAndWait` to speed up execution.
- * - Detects 'ไม่พบข้อมูล' (No data) on the webpage and skips to prevent infinite delays.
+ * - Replaced Hard Waits with `checkAndWait` that looks for actual table rows, not just buttons.
+ * - Added a strict 5-second Safety Buffer after data appears before clicking export.
+ * - Improved `prepareBeforeSearch` to wipe old table rows entirely to prevent false positives.
  * - Checks specifically for '-' in the license plate column to ensure valid data.
  * - Retries searching and downloading up to 3 times if data is missing or corrupted.
  */
@@ -20,7 +21,7 @@ const ExcelJS = require('exceljs');
 
 // --- Helper Functions ---
 
-// 1. ฟังก์ชันรอโหลดไฟล์ และแปลงเป็น CSV (ลดเวลา Default ลงเพราะเราใช้ checkAndWait รอเว็บประมวลผลไปแล้ว)
+// 1. ฟังก์ชันรอโหลดไฟล์ และแปลงเป็น CSV
 async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 120000) {
     console.log(`   Waiting for download: ${newFileName}...`);
     let downloadedFile = null;
@@ -166,15 +167,18 @@ function validateVehicleData(filePath, colIndex) {
     }
 }
 
-// --- NEW Helper: Fast Wait & Empty Check ---
-// เช็คสถานะหน้าเว็บเพื่อลดเวลาการรอ และดักจับกรณี "ไม่พบข้อมูล"
+// --- NEW Helper: Fast Wait & Empty Check (TIMING FIX) ---
+// เช็คสถานะหน้าเว็บเพื่อลดเวลาการรอ และกันการกดเร็วเกินไป
 async function checkAndWait(page, maxWaitMs) {
     console.log(`   ⏳ Waiting for system to process (Max ${maxWaitMs/1000}s)...`);
     const startTime = Date.now();
     let isEmpty = false;
 
-    // Buffer เริ่มต้นเพื่อให้เว็บดึง Loader ขึ้นมา
-    await new Promise(r => setTimeout(r, 3000));
+    // เผื่อเวลาให้เว็บส่ง Request และเปิด Loader 
+    await page.waitForFunction(() => {
+        const loaders = document.querySelectorAll('.blockUI, #loading, #loader, .loading, .spinner');
+        return Array.from(loaders).some(el => el.offsetParent !== null && window.getComputedStyle(el).display !== 'none');
+    }, { timeout: 5000 }).catch(() => {});
 
     while (Date.now() - startTime < maxWaitMs) {
         const status = await page.evaluate(() => {
@@ -190,13 +194,17 @@ async function checkAndWait(page, maxWaitMs) {
                 return { ready: true, empty: true };
             }
 
-            // 3. เช็คว่าปุ่ม Export พร้อมกดหรือยัง
+            // 3. เช็คว่าตารางมีข้อมูลแถวใหม่เข้ามาแล้วจริงๆ (กรองหัวตาราง th ทิ้ง)
+            const rows = document.querySelectorAll('table tr');
+            let dataRowCount = 0;
+            for(let i=0; i<rows.length; i++) {
+                if(!rows[i].querySelector('th')) dataRowCount++;
+            }
+            if (dataRowCount > 0) return { ready: true, empty: false };
+
+            // 4. กรณีหาตารางไม่เจอจริงๆ แต่ปุ่ม Export มาชัวร์ๆ (แผนสำรอง)
             const btn = document.getElementById('btnexport');
             if(btn && btn.offsetParent !== null && !btn.disabled) return { ready: true, empty: false };
-            
-            const btns = Array.from(document.querySelectorAll('button'));
-            const excelBtn = btns.find(b => (b.innerText.includes('Excel') || b.title === 'Excel') && b.offsetParent !== null);
-            if(excelBtn) return { ready: true, empty: false };
 
             return { ready: false };
         });
@@ -207,20 +215,35 @@ async function checkAndWait(page, maxWaitMs) {
                 console.log(`   ℹ️ System ready in ${timeTaken}s. Result: 'ไม่พบข้อมูล' (No Data).`);
                 isEmpty = true;
             } else {
-                console.log(`   ⚡ Data ready in ${timeTaken}s!`);
+                console.log(`   ⚡ Data visually ready in ${timeTaken}s!`);
             }
-            await new Promise(r => setTimeout(r, 2000)); // Buffer ให้ UI นิ่งก่อนไปต่อ
             break;
         }
         await new Promise(r => setTimeout(r, 2000));
     }
+    
+    // *** SAFETY BUFFER: บังคับหน่วงเวลาอีก 5 วินาที เพื่อให้เว็บเรนเดอร์ชัวร์ๆ ก่อนกดปุ่ม Export ***
+    if (!isEmpty) {
+        console.log(`   ⏳ Applying 5s safety buffer before attempting to export...`);
+        await new Promise(r => setTimeout(r, 5000));
+    }
+
     return isEmpty;
 }
 
-// --- Helper: Clear Old Data ---
-// ล้างข้อความเก่าทิ้งป้องกันการโดนหลอกในรอบถัดไป
+// --- Helper: Clear Old Data (ROBUST DOM CLEARING) ---
+// ล้างตารางเก่าทิ้งป้องกันการโดนหลอกในรอบถัดไป
 async function prepareBeforeSearch(page) {
     await page.evaluate(() => {
+        // ลบแถวข้อมูลตารางทิ้ง (เก็บไว้แค่บรรทัดหัวตาราง <th>)
+        const rows = document.querySelectorAll('table tr');
+        rows.forEach(tr => {
+            if (!tr.querySelector('th')) {
+                tr.remove();
+            }
+        });
+
+        // ล้างข้อความ 'ไม่พบข้อมูล'
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
         let node;
         const nodesToRemove = [];
@@ -353,7 +376,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Base 3.4.0 + Fast Validation)...');
+    console.log('🚀 Starting DTC Automation (Base 3.4.0 + Validated + Timing Fix)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -420,17 +443,19 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file1 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 1 (Attempt ${attempt}/${MAX_RETRIES})...`);
+            
+            // เคลียร์ตารางของรอบที่แล้วก่อนกดปุ่ม
             await prepareBeforeSearch(page);
+            
             await page.evaluate(() => {
                 if(typeof sertch_data === 'function') sertch_data();
                 else document.querySelector("span[onclick='sertch_data();']").click();
             });
 
-            // ใช้ Fast Wait ลดการรอคอย
             const isEmpty = await checkAndWait(page, 300000); 
             if (isEmpty) {
                 console.log(`   ⏩ Skipping Report 1 (No data found).`);
-                break; // ไม่มีข้อมูล ก็ข้ามเลย
+                break;
             }
             
             console.log('   Exporting Report 1...');
@@ -441,7 +466,6 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file1 = await waitForDownloadAndRename(downloadPath, `Report1_OverSpeed_Att${attempt}.xls`);
             
-            // เช็คว่าคอลัมน์ Index 1 มีป้ายทะเบียน "-" หรือไม่
             if (validateVehicleData(file1, 1)) {
                 console.log(`   ✅ Report 1 is valid (Found vehicle data).`);
                 break;
@@ -471,7 +495,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file2 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 2 (Attempt ${attempt}/${MAX_RETRIES})...`);
+            
             await prepareBeforeSearch(page);
+            
             await page.evaluate(() => {
                 const btn = document.querySelector('td:nth-of-type(6) > span');
                 if (btn) btn.click();
@@ -518,7 +544,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file3 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 3 (Attempt ${attempt}/${MAX_RETRIES})...`);
+            
             await prepareBeforeSearch(page);
+            
             await page.evaluate(() => {
                 const btn = document.querySelector('td:nth-of-type(6) > span');
                 if (btn) btn.click();
@@ -582,7 +610,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
                 console.log(`   Searching Report 4 (Attempt ${attempt}/${MAX_RETRIES})...`);
+                
                 await prepareBeforeSearch(page);
+                
                 await page.evaluate(() => {
                     if (typeof sertch_data === 'function') { 
                         sertch_data(); 
@@ -659,7 +689,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file5 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 5 (Attempt ${attempt}/${MAX_RETRIES})...`);
+            
             await prepareBeforeSearch(page);
+
             await page.evaluate(() => {
                 const btn = document.querySelector('td:nth-of-type(7) > span');
                 if (btn) btn.click();
