@@ -1,12 +1,12 @@
 /**
  * DTC Automation Script
- * Version: 3.7.0 (Smart Wait Fix & Size Threshold)
+ * Version: 3.8.0 (Content Validation - Check for 'ลำดับ')
  * Last Updated: 05/03/2026
  * Changes:
- * - Decreased empty file threshold from 1024 bytes to 300 bytes.
- * - Added 5-second request delay before `smartWait` to fix 0.0s premature completion.
- * - Saves GitHub Actions runner minutes.
- * - Retains auto-retry, file size verification, and all PDF generation logic.
+ * - Removed file size checking (< 300 bytes).
+ * - Implemented `isValidReportFile` to check for 'ลำดับ' in the first 20 lines.
+ * - Invalid files are automatically deleted before retrying.
+ * - Retains Smart Wait and all previous logic.
  */
 
 const puppeteer = require('puppeteer');
@@ -53,17 +53,15 @@ async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 3
     const finalFileName = `DTC_Completed_${newFileName}`;
     const newPath = path.join(downloadPath, finalFileName);
     
-    const stats = fs.statSync(oldPath);
-    if (stats.size === 0) {
-        console.warn(`   ⚠️ Downloaded file is exactly 0 bytes! Proceeding to retry loop.`);
-    }
-
     if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
     fs.renameSync(oldPath, newPath);
     
     const csvFileName = `Converted_${newFileName.replace('.xls', '.csv')}`;
     const csvPath = path.join(downloadPath, csvFileName);
     await convertToCsv(newPath, csvPath);
+    
+    // ลบไฟล์ .xls ต้นฉบับทิ้งเพื่อประหยัดพื้นที่และป้องกันความสับสน
+    if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
     
     return csvPath;
 }
@@ -121,6 +119,20 @@ async function convertToCsv(sourcePath, destPath) {
     }
 }
 
+// --- NEW Helper: Validating Report Content ---
+function isValidReportFile(filePath) {
+    try {
+        if (!fs.existsSync(filePath)) return false;
+        const content = fs.readFileSync(filePath, 'utf8');
+        // อ่าน 20 บรรทัดแรก
+        const lines = content.split('\n').slice(0, 20); 
+        // เช็คว่ามีคำว่า "ลำดับ" ใน 20 บรรทัดแรกหรือไม่
+        return lines.some(line => line.includes('ลำดับ'));
+    } catch (err) {
+        return false;
+    }
+}
+
 // --- Helper: Parse Date (Supports DD/MM/YYYY and YYYY-MM-DD) ---
 function parseDateTimeToSeconds(dateStr) {
     if (!dateStr) return 0;
@@ -157,7 +169,7 @@ function formatSeconds(totalSeconds) {
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
-// --- NEW Helper: Smart Wait (รอแบบชาญฉลาด) ---
+// --- Helper: Smart Wait (รอแบบชาญฉลาด) ---
 async function smartWait(page, maxWaitMs = 300000) {
     console.log(`   ⏳ Smart Waiting for data processing (Max ${maxWaitMs/1000}s)...`);
     
@@ -167,9 +179,7 @@ async function smartWait(page, maxWaitMs = 300000) {
     const startTime = Date.now();
     let isReady = false;
 
-    // วนลูปเช็คสถานะทุกๆ 5 วินาทีจนกว่าจะครบเวลา maxWaitMs
     while (Date.now() - startTime < maxWaitMs) {
-        // เช็คว่ามี Loading Spinner/Overlay กำลังทำงานอยู่หรือไม่
         const hasLoader = await page.evaluate(() => {
             const loaders = document.querySelectorAll('.blockUI, #loading, #loader, .loading, .spinner, .modal-backdrop');
             for (let el of loaders) {
@@ -181,18 +191,14 @@ async function smartWait(page, maxWaitMs = 300000) {
         });
 
         if (!hasLoader) {
-            // ถ้าไม่มี Loading ให้เช็คความพร้อมของข้อมูลหรือปุ่ม
             const isTableReady = await page.evaluate(() => {
                 const bodyText = document.body.innerText;
                 
-                // 1. กรณีไม่มีข้อมูล
                 if (bodyText.includes('ไม่พบข้อมูล') || bodyText.includes('No data found')) return true;
                 
-                // 2. กรณีมีปุ่ม Export โผล่ขึ้นมาให้กดได้แล้ว
                 const exportBtn = document.getElementById('btnexport');
                 if (exportBtn && exportBtn.offsetParent !== null && !exportBtn.disabled) return true;
 
-                // 3. กรณีมีปุ่ม Excel โผล่ขึ้นมา (สำหรับ Report 3, 4)
                 const btns = Array.from(document.querySelectorAll('button'));
                 const excelBtn = btns.find(b => (b.innerText.includes('Excel') || b.title === 'Excel') && b.offsetParent !== null && !b.disabled);
                 if (excelBtn) return true;
@@ -202,11 +208,10 @@ async function smartWait(page, maxWaitMs = 300000) {
 
             if (isTableReady) {
                 isReady = true;
-                break; // เลิกรอทันทีที่เจอข้อมูล/ปุ่ม! ประหยัดเวลา
+                break; 
             }
         }
 
-        // รอ 5 วินาทีแล้วเช็คใหม่
         await new Promise(r => setTimeout(r, 5000)); 
     }
 
@@ -217,7 +222,6 @@ async function smartWait(page, maxWaitMs = 300000) {
         console.warn(`   ⚠️ Smart Wait reached maximum timeout (${maxWaitMs/1000}s). Proceeding anyway...`);
     }
     
-    // Buffer เล็กน้อยก่อนกดปุ่มให้มั่นใจว่า UI นิ่งแล้ว
     await new Promise(r => setTimeout(r, 2000)); 
 }
 
@@ -314,7 +318,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation V3.6 (Smart Wait Optimization)...');
+    console.log('🚀 Starting DTC Automation V3.8 (Content Validation - Check Header)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -331,7 +335,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     await page.setViewport({ width: 1920, height: 1080 });
     await page.emulateTimezone('Asia/Bangkok');
 
-    const MAX_RETRIES = 3; // จำกัดการดึงข้อมูลซ้ำสูงสุด 3 ครั้ง
+    const MAX_RETRIES = 3; 
 
     try {
         // Step 1: Login
@@ -386,11 +390,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 else document.querySelector("span[onclick='sertch_data();']").click();
             });
 
-            // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
             console.log('   ⏳ Waiting 5s for request to initialize...');
             await new Promise(r => setTimeout(r, 5000));
 
-            // Use Smart Wait (Max 5 mins)
             await smartWait(page, 300000);
             
             try { await page.waitForSelector('#btnexport', { visible: true, timeout: 30000 }); } catch(e) {}
@@ -399,11 +401,13 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file1 = await waitForDownloadAndRename(downloadPath, `Report1_OverSpeed_Att${attempt}.xls`);
             
-            if (fs.existsSync(file1) && fs.statSync(file1).size < 300) {
-                console.warn(`   ⚠️ Report 1 File size < 300 bytes (${fs.statSync(file1).size} bytes). Retrying...`);
+            // ตรวจสอบความถูกต้องของเนื้อหาไฟล์ (หาคำว่า ลำดับ)
+            if (!isValidReportFile(file1)) {
+                console.warn(`   ⚠️ Report 1 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                if (fs.existsSync(file1)) fs.unlinkSync(file1);
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 1.`);
             } else {
-                console.log(`   ✅ File size OK (${fs.statSync(file1).size} bytes).`);
+                console.log(`   ✅ Report 1 is valid (Found 'ลำดับ').`);
                 break;
             }
         }
@@ -429,11 +433,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             console.log(`   Searching Report 2 (Attempt ${attempt}/${MAX_RETRIES})...`);
             await page.click('td:nth-of-type(6) > span');
             
-            // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
             console.log('   ⏳ Waiting 5s for request to initialize...');
             await new Promise(r => setTimeout(r, 5000));
             
-            // Use Smart Wait (Max 3 mins)
             await smartWait(page, 180000);
 
             try { await page.waitForSelector('#btnexport', { visible: true, timeout: 30000 }); } catch(e) {}
@@ -441,11 +443,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file2 = await waitForDownloadAndRename(downloadPath, `Report2_Idling_Att${attempt}.xls`);
             
-            if (fs.existsSync(file2) && fs.statSync(file2).size < 300) {
-                console.warn(`   ⚠️ Report 2 File size < 300 bytes (${fs.statSync(file2).size} bytes). Retrying...`);
+            if (!isValidReportFile(file2)) {
+                console.warn(`   ⚠️ Report 2 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                if (fs.existsSync(file2)) fs.unlinkSync(file2);
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 2.`);
             } else {
-                console.log(`   ✅ File size OK (${fs.statSync(file2).size} bytes).`);
+                console.log(`   ✅ Report 2 is valid (Found 'ลำดับ').`);
                 break;
             }
         }
@@ -469,11 +472,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             console.log(`   Searching Report 3 (Attempt ${attempt}/${MAX_RETRIES})...`);
             await page.click('td:nth-of-type(6) > span');
             
-            // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
             console.log('   ⏳ Waiting 5s for request to initialize...');
             await new Promise(r => setTimeout(r, 5000));
             
-            // Use Smart Wait (Max 3 mins)
             await smartWait(page, 180000);
             
             await page.evaluate(() => {
@@ -484,11 +485,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file3 = await waitForDownloadAndRename(downloadPath, `Report3_SuddenBrake_Att${attempt}.xls`);
             
-            if (fs.existsSync(file3) && fs.statSync(file3).size < 300) {
-                console.warn(`   ⚠️ Report 3 File size < 300 bytes (${fs.statSync(file3).size} bytes). Retrying...`);
+            if (!isValidReportFile(file3)) {
+                console.warn(`   ⚠️ Report 3 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                if (fs.existsSync(file3)) fs.unlinkSync(file3);
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 3.`);
             } else {
-                console.log(`   ✅ File size OK (${fs.statSync(file3).size} bytes).`);
+                console.log(`   ✅ Report 3 is valid (Found 'ลำดับ').`);
                 break;
             }
         }
@@ -525,11 +527,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                     if (typeof sertch_data === 'function') { sertch_data(); } else { document.querySelector('td:nth-of-type(6) > span').click(); }
                 });
 
-                // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
                 console.log('   ⏳ Waiting 5s for request to initialize...');
                 await new Promise(r => setTimeout(r, 5000));
 
-                // Use Smart Wait (Max 3 mins)
                 await smartWait(page, 180000);
 
                 await page.evaluate(() => {
@@ -545,11 +545,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 
                 file4 = await waitForDownloadAndRename(downloadPath, `Report4_HarshStart_Att${attempt}.xls`);
                 
-                if (fs.existsSync(file4) && fs.statSync(file4).size < 300) {
-                    console.warn(`   ⚠️ Report 4 File size < 300 bytes (${fs.statSync(file4).size} bytes). Retrying...`);
+                if (!isValidReportFile(file4)) {
+                    console.warn(`   ⚠️ Report 4 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                    if (fs.existsSync(file4)) fs.unlinkSync(file4);
                     if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 4.`);
                 } else {
-                    console.log(`   ✅ File size OK (${fs.statSync(file4).size} bytes).`);
+                    console.log(`   ✅ Report 4 is valid (Found 'ลำดับ').`);
                     break;
                 }
             }
@@ -592,11 +593,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             console.log(`   Searching Report 5 (Attempt ${attempt}/${MAX_RETRIES})...`);
             await page.click('td:nth-of-type(7) > span');
             
-            // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
             console.log('   ⏳ Waiting 5s for request to initialize...');
             await new Promise(r => setTimeout(r, 5000));
             
-            // Use Smart Wait (Max 3 mins)
             await smartWait(page, 180000);
 
             try { await page.waitForSelector('#btnexport', { visible: true, timeout: 30000 }); } catch(e) {}
@@ -604,11 +603,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file5 = await waitForDownloadAndRename(downloadPath, `Report5_ForbiddenParking_Att${attempt}.xls`);
             
-            if (fs.existsSync(file5) && fs.statSync(file5).size < 300) {
-                console.warn(`   ⚠️ Report 5 File size < 300 bytes (${fs.statSync(file5).size} bytes). Retrying...`);
+            if (!isValidReportFile(file5)) {
+                console.warn(`   ⚠️ Report 5 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                if (fs.existsSync(file5)) fs.unlinkSync(file5);
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 5.`);
             } else {
-                console.log(`   ✅ File size OK (${fs.statSync(file5).size} bytes).`);
+                console.log(`   ✅ Report 5 is valid (Found 'ลำดับ').`);
                 break;
             }
         }
@@ -616,7 +616,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // =================================================================
         // STEP 7: Generate PDF Summary
         // =================================================================
-        console.log('📑 Step 7: Generating PDF Summary (Revised V3.6)...');
+        console.log('📑 Step 7: Generating PDF Summary (Revised V3.8)...');
 
         const FILES_CSV = {
             OVERSPEED: file1,
@@ -921,7 +921,6 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // =================================================================
         console.log('📧 Step 8: Zipping CSVs & Sending Email...');
         
-        // เลือก Zip เฉพาะไฟล์ที่สำเร็จในครั้งสุดท้ายเท่านั้น (กรองขยะออก)
         const csvsToZipPaths = Object.values(FILES_CSV).filter(f => f !== '' && fs.existsSync(f));
         const csvsToZipNames = csvsToZipPaths.map(p => path.basename(p));
 
