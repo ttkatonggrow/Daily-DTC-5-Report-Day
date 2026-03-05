@@ -1,12 +1,11 @@
 /**
  * DTC Automation Script
- * Version: 4.3.0 (Ultimate Timing Fix & DOM Prep)
+ * Version: 4.4.0 (Robust Execution & Anti-Crash)
  * Last Updated: 05/03/2026
  * Changes:
- * - Added `prepareBeforeSearch` to wipe old table data/text before clicking search.
- * - Centralized `clickExport` logic for robust button clicking across all reports.
- * - Improved `smartWait` to detect true DOM updates after loader finishes.
- * - Added a 3-second safety buffer post-load to guarantee event listeners bind properly.
+ * - Wrapped the search, wait, and export sequences in try-catch to prevent timeouts from crashing the script.
+ * - Relaxed `clickExport` constraints (removed offsetParent check) to ensure buttons are clicked even if styled incorrectly by the site.
+ * - Centralized stability for all 5 reports.
  */
 
 const puppeteer = require('puppeteer');
@@ -122,7 +121,6 @@ async function convertToCsv(sourcePath, destPath) {
 // --- NEW Helper: Validating Report Content (Deep Check) ---
 function isValidReportFile(filePath) {
     try {
-        // ป้องกัน Error หาก filePath เป็นค่าว่าง
         if (!filePath || filePath === '') return false;
         if (!fs.existsSync(filePath)) return false;
 
@@ -137,7 +135,6 @@ function isValidReportFile(filePath) {
             return true;
         }
 
-        // ถ้ามีแค่หัวตาราง แต่ไม่มีข้อมูลหรือบรรทัดสรุปเลย ถือว่าไฟล์พัง
         return false;
     } catch (err) {
         return false;
@@ -180,15 +177,12 @@ function formatSeconds(totalSeconds) {
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
-// --- NEW Helper: Prepare DOM Before Search ---
-// ป้องกันปัญหา smartWait อ่านข้อมูลรอบเก่าแล้วข้ามการรอ (False Positive)
+// --- Helper: Prepare DOM Before Search ---
 async function prepareBeforeSearch(page) {
     await page.evaluate(() => {
-        // 1. ล้างข้อมูลตารางเก่า
         const tbodies = document.querySelectorAll('table tbody');
         tbodies.forEach(tb => tb.innerHTML = '');
         
-        // 2. ล้างข้อความ 'ไม่พบข้อมูล' ของรอบเก่าทิ้ง
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
         let node;
         const nodesToRemove = [];
@@ -201,42 +195,40 @@ async function prepareBeforeSearch(page) {
     });
 }
 
-// --- NEW Helper: Click Export Button ---
-// รวมลอจิกการกดปุ่ม Export เพื่อให้ครอบคลุมและแม่นยำขึ้น
+// --- Helper: Click Export Button (Relaxed Visibility Check) ---
 async function clickExport(page) {
     await page.evaluate(() => {
         const btnExport = document.getElementById('btnexport');
-        if (btnExport && btnExport.offsetParent !== null && !btnExport.disabled) {
+        if (btnExport && !btnExport.disabled) {
             btnExport.click();
             return;
         }
         
         const btns = Array.from(document.querySelectorAll('button'));
-        const excelBtn = btns.find(b => (b.innerText.includes('Excel') || b.title === 'Excel') && b.offsetParent !== null && !b.disabled);
+        const excelBtn = btns.find(b => (b.innerText.includes('Excel') || b.title === 'Excel') && !b.disabled);
         if (excelBtn) {
             excelBtn.click();
             return;
         }
         
         const fallbackBtn = document.querySelector('#table button:nth-of-type(3)');
-        if (fallbackBtn && fallbackBtn.offsetParent !== null) {
+        if (fallbackBtn) {
             fallbackBtn.click();
             return;
         }
 
         const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
         const xpathBtn = xpathResult.singleNodeValue;
-        if (xpathBtn && xpathBtn.offsetParent !== null) {
+        if (xpathBtn) {
             xpathBtn.click();
         }
     });
 }
 
-// --- Helper: Smart Wait (รอแบบชาญฉลาด) ---
+// --- Helper: Smart Wait ---
 async function smartWait(page, maxWaitMs = 300000) {
     console.log(`   ⏳ Smart Waiting for data processing (Max ${maxWaitMs/1000}s)...`);
     
-    // รอ Loader ปรากฏ (ให้เวลาสูงสุด 5 วิ เพื่อเปิดโอกาสให้เว็บเริ่มทำงาน)
     await page.waitForFunction(() => {
         const loaders = document.querySelectorAll('.blockUI, #loading, #loader, .loading, .spinner');
         return Array.from(loaders).some(el => el.offsetParent !== null && window.getComputedStyle(el).display !== 'none');
@@ -245,21 +237,17 @@ async function smartWait(page, maxWaitMs = 300000) {
     const startTime = Date.now();
     let isReady = false;
 
-    // ลูปเช็คจนกว่าจะครบโควตาเวลา
     while (Date.now() - startTime < maxWaitMs) {
         const hasLoader = await page.evaluate(() => {
             const loaders = document.querySelectorAll('.blockUI, #loading, #loader, .loading, .spinner, .modal-backdrop');
             return Array.from(loaders).some(el => el.offsetParent !== null && window.getComputedStyle(el).display !== 'none');
         });
 
-        // ถ้าหน้าเว็บไม่มี Loader แล้ว
         if (!hasLoader) {
             const isTableOrEmptyReady = await page.evaluate(() => {
                 const txt = document.body.innerText;
-                // เจอกรณีไม่มีข้อมูล (ซึ่งมั่นใจได้ว่าเป็นของใหม่ เพราะเราเคลียร์ของเก่าทิ้งใน prepareBeforeSearch แล้ว)
                 if (txt.includes('ไม่พบข้อมูล') || txt.includes('No data found')) return true;
                 
-                // ถ้าระบบไม่ได้แสดงคำว่า ไม่พบข้อมูล ก็ต้องมี Row ข้อมูลปรากฏขึ้นมา
                 const trs = document.querySelectorAll('table tbody tr');
                 if (trs.length > 0) return true;
 
@@ -282,11 +270,10 @@ async function smartWait(page, maxWaitMs = 300000) {
         console.warn(`   ⚠️ Smart Wait timed out (${maxWaitMs/1000}s). Proceeding anyway...`);
     }
     
-    // Buffer สุดท้าย 3 วินาที เพื่อรอให้ปุ่ม Export ผูก Event Listener บนเว็บเสร็จสมบูรณ์
     await new Promise(r => setTimeout(r, 3000)); 
 }
 
-// --- FUNCTION: Process CSV V3 (Bulletproofed) ---
+// --- FUNCTION: Process CSV V3 ---
 function processCSV_V3(filePath, config) {
     try {
         if (!filePath || filePath === '') return [];
@@ -362,7 +349,6 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         output.on('close', () => resolve(outPath));
         archive.on('error', (err) => reject(err));
         archive.pipe(output);
-        // Ensure flat structure in ZIP (no nested folders)
         filesToZip.forEach(file => archive.file(path.join(sourceDir, file), { name: path.basename(file) }));
         archive.finalize();
     });
@@ -381,7 +367,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation V4.3 (Ultimate Timing Fix)...');
+    console.log('🚀 Starting DTC Automation V4.4 (Robust Execution)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -449,28 +435,32 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 1 (Attempt ${attempt}/${MAX_RETRIES})...`);
             
-            // ล้างกระดานข้อมูลเก่าก่อนค้นหา
-            await prepareBeforeSearch(page);
+            try {
+                await prepareBeforeSearch(page);
 
-            await page.evaluate(() => {
-                if(typeof sertch_data === 'function') {
-                    sertch_data();
-                } else {
-                    var btn = document.querySelector("span[onclick='sertch_data();']");
-                    if (btn) btn.click();
-                }
-            });
+                await page.evaluate(() => {
+                    if(typeof sertch_data === 'function') {
+                        sertch_data();
+                    } else {
+                        var btn = document.querySelector("span[onclick='sertch_data();']");
+                        if (btn) btn.click();
+                    }
+                });
 
-            await smartWait(page, 300000);
-            
-            console.log('   Exporting Report 1...');
-            await clickExport(page);
-            
-            file1 = await waitForDownloadAndRename(downloadPath, `Report1_OverSpeed_Att${attempt}.xls`);
+                await smartWait(page, 300000);
+                
+                console.log('   Exporting Report 1...');
+                await clickExport(page);
+                
+                file1 = await waitForDownloadAndRename(downloadPath, `Report1_OverSpeed_Att${attempt}.xls`);
+            } catch (err) {
+                console.warn(`   ⚠️ Attempt ${attempt} encountered an error: ${err.message}`);
+                file1 = ''; 
+            }
             
             if (!isValidReportFile(file1)) {
                 console.warn(`   ⚠️ Report 1 is invalid (Missing data or footer). Deleting and retrying...`);
-                if (fs.existsSync(file1)) fs.unlinkSync(file1);
+                if (file1 && fs.existsSync(file1)) fs.unlinkSync(file1);
                 file1 = ''; 
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 1.`);
             } else {
@@ -499,23 +489,28 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 2 (Attempt ${attempt}/${MAX_RETRIES})...`);
             
-            await prepareBeforeSearch(page);
+            try {
+                await prepareBeforeSearch(page);
 
-            await page.evaluate(() => {
-                var btn = document.querySelector('td:nth-of-type(6) > span');
-                if (btn) btn.click();
-            });
-            
-            await smartWait(page, 180000);
+                await page.evaluate(() => {
+                    var btn = document.querySelector('td:nth-of-type(6) > span');
+                    if (btn) btn.click();
+                });
+                
+                await smartWait(page, 180000);
 
-            console.log('   Exporting Report 2...');
-            await clickExport(page);
-            
-            file2 = await waitForDownloadAndRename(downloadPath, `Report2_Idling_Att${attempt}.xls`);
+                console.log('   Exporting Report 2...');
+                await clickExport(page);
+                
+                file2 = await waitForDownloadAndRename(downloadPath, `Report2_Idling_Att${attempt}.xls`);
+            } catch (err) {
+                console.warn(`   ⚠️ Attempt ${attempt} encountered an error: ${err.message}`);
+                file2 = '';
+            }
             
             if (!isValidReportFile(file2)) {
                 console.warn(`   ⚠️ Report 2 is invalid (Missing data or footer). Deleting and retrying...`);
-                if (fs.existsSync(file2)) fs.unlinkSync(file2);
+                if (file2 && fs.existsSync(file2)) fs.unlinkSync(file2);
                 file2 = '';
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 2.`);
             } else {
@@ -542,23 +537,28 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 3 (Attempt ${attempt}/${MAX_RETRIES})...`);
             
-            await prepareBeforeSearch(page);
+            try {
+                await prepareBeforeSearch(page);
 
-            await page.evaluate(() => {
-                var btn = document.querySelector('td:nth-of-type(6) > span');
-                if (btn) btn.click();
-            });
-            
-            await smartWait(page, 180000);
-            
-            console.log('   Exporting Report 3...');
-            await clickExport(page);
-            
-            file3 = await waitForDownloadAndRename(downloadPath, `Report3_SuddenBrake_Att${attempt}.xls`);
-            
+                await page.evaluate(() => {
+                    var btn = document.querySelector('td:nth-of-type(6) > span');
+                    if (btn) btn.click();
+                });
+                
+                await smartWait(page, 180000);
+                
+                console.log('   Exporting Report 3...');
+                await clickExport(page);
+                
+                file3 = await waitForDownloadAndRename(downloadPath, `Report3_SuddenBrake_Att${attempt}.xls`);
+            } catch (err) {
+                console.warn(`   ⚠️ Attempt ${attempt} encountered an error: ${err.message}`);
+                file3 = '';
+            }
+
             if (!isValidReportFile(file3)) {
                 console.warn(`   ⚠️ Report 3 is invalid (Missing data or footer). Deleting and retrying...`);
-                if (fs.existsSync(file3)) fs.unlinkSync(file3);
+                if (file3 && fs.existsSync(file3)) fs.unlinkSync(file3);
                 file3 = '';
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 3.`);
             } else {
@@ -596,27 +596,32 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
                 console.log(`   Searching Report 4 (Attempt ${attempt}/${MAX_RETRIES})...`);
                 
-                await prepareBeforeSearch(page);
+                try {
+                    await prepareBeforeSearch(page);
 
-                await page.evaluate(() => {
-                    if (typeof sertch_data === 'function') { 
-                        sertch_data(); 
-                    } else { 
-                        var btn = document.querySelector('td:nth-of-type(6) > span');
-                        if (btn) btn.click(); 
-                    }
-                });
+                    await page.evaluate(() => {
+                        if (typeof sertch_data === 'function') { 
+                            sertch_data(); 
+                        } else { 
+                            var btn = document.querySelector('td:nth-of-type(6) > span');
+                            if (btn) btn.click(); 
+                        }
+                    });
 
-                await smartWait(page, 180000);
+                    await smartWait(page, 180000);
 
-                console.log('   Exporting Report 4...');
-                await clickExport(page);
-                
-                file4 = await waitForDownloadAndRename(downloadPath, `Report4_HarshStart_Att${attempt}.xls`);
+                    console.log('   Exporting Report 4...');
+                    await clickExport(page);
+                    
+                    file4 = await waitForDownloadAndRename(downloadPath, `Report4_HarshStart_Att${attempt}.xls`);
+                } catch (err) {
+                    console.warn(`   ⚠️ Attempt ${attempt} encountered an error: ${err.message}`);
+                    file4 = '';
+                }
                 
                 if (!isValidReportFile(file4)) {
                     console.warn(`   ⚠️ Report 4 is invalid (Missing data or footer). Deleting and retrying...`);
-                    if (fs.existsSync(file4)) fs.unlinkSync(file4);
+                    if (file4 && fs.existsSync(file4)) fs.unlinkSync(file4);
                     file4 = '';
                     if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 4.`);
                 } else {
@@ -625,7 +630,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 }
             }
         } catch (error) {
-            console.error('❌ Report 4 Failed:', error.message);
+            console.error('❌ Report 4 Failed during setup:', error.message);
         }
 
         // REPORT 5: Forbidden
@@ -662,23 +667,28 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 5 (Attempt ${attempt}/${MAX_RETRIES})...`);
             
-            await prepareBeforeSearch(page);
+            try {
+                await prepareBeforeSearch(page);
 
-            await page.evaluate(() => {
-                var btn = document.querySelector('td:nth-of-type(7) > span');
-                if (btn) btn.click();
-            });
-            
-            await smartWait(page, 180000);
+                await page.evaluate(() => {
+                    var btn = document.querySelector('td:nth-of-type(7) > span');
+                    if (btn) btn.click();
+                });
+                
+                await smartWait(page, 180000);
 
-            console.log('   Exporting Report 5...');
-            await clickExport(page);
-            
-            file5 = await waitForDownloadAndRename(downloadPath, `Report5_ForbiddenParking_Att${attempt}.xls`);
-            
+                console.log('   Exporting Report 5...');
+                await clickExport(page);
+                
+                file5 = await waitForDownloadAndRename(downloadPath, `Report5_ForbiddenParking_Att${attempt}.xls`);
+            } catch (err) {
+                console.warn(`   ⚠️ Attempt ${attempt} encountered an error: ${err.message}`);
+                file5 = '';
+            }
+
             if (!isValidReportFile(file5)) {
                 console.warn(`   ⚠️ Report 5 is invalid (Missing data or footer). Deleting and retrying...`);
-                if (fs.existsSync(file5)) fs.unlinkSync(file5);
+                if (file5 && fs.existsSync(file5)) fs.unlinkSync(file5);
                 file5 = '';
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 5.`);
             } else {
@@ -690,7 +700,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // =================================================================
         // STEP 7: Generate PDF Summary
         // =================================================================
-        console.log('📑 Step 7: Generating PDF Summary (Revised V4.3 Ultimate Timing Fix)...');
+        console.log('📑 Step 7: Generating PDF Summary (Revised V4.4 Robust Execution)...');
 
         const FILES_CSV = {
             OVERSPEED: file1,
@@ -984,7 +994,6 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         try {
             const pdfPath = path.join(downloadPath, 'Fleet_Safety_Analysis_Report.pdf');
             
-            // ดักจับ Error ไฟล์เปิดค้าง พยายามลบไฟล์เก่าก่อนเพื่อป้องกันเซฟทับไม่ได้
             if (fs.existsSync(pdfPath)) {
                 try {
                     fs.unlinkSync(pdfPath);
@@ -993,13 +1002,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 }
             }
 
-            // เปลี่ยนเป็น networkidle2 และบังคับ Timeout 60วิ ป้องกัน Google Fonts ทำค้าง
             await page.setContent(html, { waitUntil: 'networkidle2', timeout: 60000 });
             await page.pdf({
                 path: pdfPath,
                 format: 'A4',
                 printBackground: true,
-                timeout: 60000 // บังคับตัดจบค้างตอน Render PDF
+                timeout: 60000 
             });
             console.log(`   ✅ PDF Generated: ${pdfPath}`);
         } catch (pdfErr) {
@@ -1045,7 +1053,6 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         }
 
         console.log('🧹 Cleanup...');
-        // ปลดคอมเมนต์ Cleanup เพื่อป้องกันไฟล์ขยะ/การเกิดไฟล์ Zip โฟลเดอร์ซ้ำซ้อนในการรันครั้งถัดไปหรือในระบบ CI/CD
         if (fs.existsSync(downloadPath)) {
             fs.rmSync(downloadPath, { recursive: true, force: true });
         }
