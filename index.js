@@ -1,12 +1,12 @@
 /**
  * DTC Automation Script
- * Version: 3.9.0 (Deep Validation & Cleanup)
+ * Version: 4.0.0 (Step 7 Bulletproof & Deep Validation)
  * Last Updated: 05/03/2026
  * Changes:
- * - Upgraded `isValidReportFile`: Must contain 'ลำดับ' AND either 'รวม' or '-' to guarantee complete file download.
- * - Uncommented Cleanup code to delete 'downloads' folder and prevent duplicate/nested ZIP artifacts.
- * - Enforced flat structure in ZIP creation.
- * - Retains 5s buffer before Smart Wait to fix premature completion.
+ * - Bulletproofed Step 7 against empty file paths ('') to prevent TypeError.
+ * - Added early returns and safe guards in `processCSV_V3` and `isValidReportFile`.
+ * - Changed PDF `setContent` to `domcontentloaded` to prevent Google Fonts timeout errors.
+ * - Retains Smart Wait, Content Validation, and Cleanup logic.
  */
 
 const puppeteer = require('puppeteer');
@@ -122,7 +122,10 @@ async function convertToCsv(sourcePath, destPath) {
 // --- NEW Helper: Validating Report Content (Deep Check) ---
 function isValidReportFile(filePath) {
     try {
+        // ป้องกัน Error หาก filePath เป็นค่าว่าง
+        if (!filePath || filePath === '') return false;
         if (!fs.existsSync(filePath)) return false;
+
         const content = fs.readFileSync(filePath, 'utf8');
         
         // 1. เช็คหัวตาราง: ต้องมีคำว่า "ลำดับ"
@@ -233,11 +236,16 @@ async function smartWait(page, maxWaitMs = 300000) {
     await new Promise(r => setTimeout(r, 2000)); 
 }
 
-// --- FUNCTION: Process CSV V3 ---
+// --- FUNCTION: Process CSV V3 (Bulletproofed) ---
 function processCSV_V3(filePath, config) {
     try {
+        // ป้องกัน Error หาก filePath เป็นค่าว่าง (ในกรณีที่ข้ามรายงานนั้นไป)
+        if (!filePath || filePath === '') {
+            return [];
+        }
+
         if (!fs.existsSync(filePath)) {
-            console.warn(`File not found: ${filePath}`);
+            console.warn(`   ⚠️ File not found: ${filePath}`);
             return [];
         }
 
@@ -258,7 +266,7 @@ function processCSV_V3(filePath, config) {
         }
 
         if (headerIndex === -1) {
-            console.warn(`Header 'ลำดับ' not found in ${path.basename(filePath)}`);
+            console.warn(`   ⚠️ Header 'ลำดับ' not found in ${path.basename(filePath)}`);
             return [];
         }
 
@@ -290,7 +298,7 @@ function processCSV_V3(filePath, config) {
         return results;
 
     } catch (err) {
-        console.error(`Error processing ${filePath}:`, err.message);
+        console.error(`   ❌ Error processing ${filePath}:`, err.message);
         return [];
     }
 }
@@ -327,7 +335,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation V3.9 (Deep Content Validation & Cleanup)...');
+    console.log('🚀 Starting DTC Automation V4.0 (Step 7 Bulletproof & Deep Validation)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -629,7 +637,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // =================================================================
         // STEP 7: Generate PDF Summary
         // =================================================================
-        console.log('📑 Step 7: Generating PDF Summary (Revised V3.9)...');
+        console.log('📑 Step 7: Generating PDF Summary (Revised V4.0 Bulletproof)...');
 
         const FILES_CSV = {
             OVERSPEED: file1,
@@ -668,13 +676,13 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         const maxIdleCar = topIdle.length > 0 ? topIdle[0] : { time: 0, license: '-' };
 
         // 3. Process Report 3 & 4
-        const rawBrake = (FILES_CSV.SUDDEN_BRAKE && fs.existsSync(FILES_CSV.SUDDEN_BRAKE)) ? processCSV_V3(FILES_CSV.SUDDEN_BRAKE, {
+        const rawBrake = processCSV_V3(FILES_CSV.SUDDEN_BRAKE, {
             colLicense: 1, colDate: 3, colSpeedStart: 4, colSpeedEnd: 5
-        }) : [];
+        });
 
-        const rawStart = (FILES_CSV.HARSH_START && fs.existsSync(FILES_CSV.HARSH_START)) ? processCSV_V3(FILES_CSV.HARSH_START, {
+        const rawStart = processCSV_V3(FILES_CSV.HARSH_START, {
             colLicense: 1, colDate: 3, colSpeedStart: 4, colSpeedEnd: 5
-        }) : [];
+        });
         
         const criticalEvents = [
             ...rawBrake.map(r => ({ ...r, type: 'Sudden Brake', level: r.date })), 
@@ -920,24 +928,30 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         </html>
         `;
 
-        await page.setContent(html, { waitUntil: 'networkidle0' });
-        const pdfPath = path.join(downloadPath, 'Fleet_Safety_Analysis_Report.pdf');
-        await page.pdf({
-            path: pdfPath,
-            format: 'A4',
-            printBackground: true
-        });
-        console.log(`   ✅ PDF Generated: ${pdfPath}`);
+        try {
+            // เปลี่ยนจาก networkidle0 เป็น domcontentloaded ป้องกัน Error Timeout เวลาดึง Font นานเกินไป
+            await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            const pdfPath = path.join(downloadPath, 'Fleet_Safety_Analysis_Report.pdf');
+            await page.pdf({
+                path: pdfPath,
+                format: 'A4',
+                printBackground: true
+            });
+            console.log(`   ✅ PDF Generated: ${pdfPath}`);
+        } catch (pdfErr) {
+            console.error('   ❌ PDF Generation Error:', pdfErr.message);
+        }
 
         // =================================================================
         // STEP 8: Zip & Email
         // =================================================================
         console.log('📧 Step 8: Zipping CSVs & Sending Email...');
         
-        const csvsToZipPaths = Object.values(FILES_CSV).filter(f => f !== '' && fs.existsSync(f));
+        const pdfPathFinal = path.join(downloadPath, 'Fleet_Safety_Analysis_Report.pdf');
+        const csvsToZipPaths = Object.values(FILES_CSV).filter(f => f && f !== '' && fs.existsSync(f));
         const csvsToZipNames = csvsToZipPaths.map(p => path.basename(p));
 
-        if (csvsToZipNames.length > 0 || fs.existsSync(pdfPath)) {
+        if (csvsToZipNames.length > 0 || fs.existsSync(pdfPathFinal)) {
             const zipName = `DTC_Report_Data_${today.replace(/ /g, '_')}.zip`;
             const zipPath = path.join(downloadPath, zipName);
             
@@ -947,7 +961,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
 
             const attachments = [];
             if (fs.existsSync(zipPath)) attachments.push({ filename: zipName, path: zipPath });
-            if (fs.existsSync(pdfPath)) attachments.push({ filename: 'Fleet_Safety_Analysis_Report.pdf', path: pdfPath });
+            if (fs.existsSync(pdfPathFinal)) attachments.push({ filename: 'Fleet_Safety_Analysis_Report.pdf', path: pdfPathFinal });
 
             const transporter = nodemailer.createTransport({
                 service: 'gmail',
