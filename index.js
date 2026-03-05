@@ -1,10 +1,10 @@
 /**
  * DTC Automation Script
- * Version: 3.6.0 (Smart Wait Optimization)
+ * Version: 3.7.0 (Smart Wait Fix & Size Threshold)
  * Last Updated: 05/03/2026
  * Changes:
- * - Introduced `smartWait` function to replace 3-5 minute hard delays.
- * - Dramatically reduces execution time by auto-detecting when reports are ready.
+ * - Decreased empty file threshold from 1024 bytes to 300 bytes.
+ * - Added 5-second request delay before `smartWait` to fix 0.0s premature completion.
  * - Saves GitHub Actions runner minutes.
  * - Retains auto-retry, file size verification, and all PDF generation logic.
  */
@@ -167,7 +167,7 @@ async function smartWait(page, maxWaitMs = 300000) {
     const startTime = Date.now();
     let isReady = false;
 
-    // วนลูปเช็คสถานะทุกๆ 3 วินาทีจนกว่าจะครบเวลา maxWaitMs
+    // วนลูปเช็คสถานะทุกๆ 5 วินาทีจนกว่าจะครบเวลา maxWaitMs
     while (Date.now() - startTime < maxWaitMs) {
         // เช็คว่ามี Loading Spinner/Overlay กำลังทำงานอยู่หรือไม่
         const hasLoader = await page.evaluate(() => {
@@ -206,8 +206,8 @@ async function smartWait(page, maxWaitMs = 300000) {
             }
         }
 
-        // รอ 3 วินาทีแล้วเช็คใหม่
-        await new Promise(r => setTimeout(r, 3000)); 
+        // รอ 5 วินาทีแล้วเช็คใหม่
+        await new Promise(r => setTimeout(r, 5000)); 
     }
 
     const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -386,6 +386,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 else document.querySelector("span[onclick='sertch_data();']").click();
             });
 
+            // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
+            console.log('   ⏳ Waiting 5s for request to initialize...');
+            await new Promise(r => setTimeout(r, 5000));
+
             // Use Smart Wait (Max 5 mins)
             await smartWait(page, 300000);
             
@@ -395,8 +399,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file1 = await waitForDownloadAndRename(downloadPath, `Report1_OverSpeed_Att${attempt}.xls`);
             
-            if (fs.existsSync(file1) && fs.statSync(file1).size < 1024) {
-                console.warn(`   ⚠️ Report 1 File size < 1KB (${fs.statSync(file1).size} bytes). Retrying...`);
+            if (fs.existsSync(file1) && fs.statSync(file1).size < 300) {
+                console.warn(`   ⚠️ Report 1 File size < 300 bytes (${fs.statSync(file1).size} bytes). Retrying...`);
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 1.`);
             } else {
                 console.log(`   ✅ File size OK (${fs.statSync(file1).size} bytes).`);
@@ -425,6 +429,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             console.log(`   Searching Report 2 (Attempt ${attempt}/${MAX_RETRIES})...`);
             await page.click('td:nth-of-type(6) > span');
             
+            // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
+            console.log('   ⏳ Waiting 5s for request to initialize...');
+            await new Promise(r => setTimeout(r, 5000));
+            
             // Use Smart Wait (Max 3 mins)
             await smartWait(page, 180000);
 
@@ -433,8 +441,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file2 = await waitForDownloadAndRename(downloadPath, `Report2_Idling_Att${attempt}.xls`);
             
-            if (fs.existsSync(file2) && fs.statSync(file2).size < 1024) {
-                console.warn(`   ⚠️ Report 2 File size < 1KB (${fs.statSync(file2).size} bytes). Retrying...`);
+            if (fs.existsSync(file2) && fs.statSync(file2).size < 300) {
+                console.warn(`   ⚠️ Report 2 File size < 300 bytes (${fs.statSync(file2).size} bytes). Retrying...`);
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 2.`);
             } else {
                 console.log(`   ✅ File size OK (${fs.statSync(file2).size} bytes).`);
@@ -461,6 +469,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             console.log(`   Searching Report 3 (Attempt ${attempt}/${MAX_RETRIES})...`);
             await page.click('td:nth-of-type(6) > span');
             
+            // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
+            console.log('   ⏳ Waiting 5s for request to initialize...');
+            await new Promise(r => setTimeout(r, 5000));
+            
             // Use Smart Wait (Max 3 mins)
             await smartWait(page, 180000);
             
@@ -472,8 +484,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file3 = await waitForDownloadAndRename(downloadPath, `Report3_SuddenBrake_Att${attempt}.xls`);
             
-            if (fs.existsSync(file3) && fs.statSync(file3).size < 1024) {
-                console.warn(`   ⚠️ Report 3 File size < 1KB (${fs.statSync(file3).size} bytes). Retrying...`);
+            if (fs.existsSync(file3) && fs.statSync(file3).size < 300) {
+                console.warn(`   ⚠️ Report 3 File size < 300 bytes (${fs.statSync(file3).size} bytes). Retrying...`);
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 3.`);
             } else {
                 console.log(`   ✅ File size OK (${fs.statSync(file3).size} bytes).`);
@@ -513,6 +525,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                     if (typeof sertch_data === 'function') { sertch_data(); } else { document.querySelector('td:nth-of-type(6) > span').click(); }
                 });
 
+                // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
+                console.log('   ⏳ Waiting 5s for request to initialize...');
+                await new Promise(r => setTimeout(r, 5000));
+
                 // Use Smart Wait (Max 3 mins)
                 await smartWait(page, 180000);
 
@@ -529,8 +545,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 
                 file4 = await waitForDownloadAndRename(downloadPath, `Report4_HarshStart_Att${attempt}.xls`);
                 
-                if (fs.existsSync(file4) && fs.statSync(file4).size < 1024) {
-                    console.warn(`   ⚠️ Report 4 File size < 1KB (${fs.statSync(file4).size} bytes). Retrying...`);
+                if (fs.existsSync(file4) && fs.statSync(file4).size < 300) {
+                    console.warn(`   ⚠️ Report 4 File size < 300 bytes (${fs.statSync(file4).size} bytes). Retrying...`);
                     if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 4.`);
                 } else {
                     console.log(`   ✅ File size OK (${fs.statSync(file4).size} bytes).`);
@@ -576,6 +592,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             console.log(`   Searching Report 5 (Attempt ${attempt}/${MAX_RETRIES})...`);
             await page.click('td:nth-of-type(7) > span');
             
+            // เพิ่มจังหวะรอ Request ก่อนเรียกใช้ Smart Wait
+            console.log('   ⏳ Waiting 5s for request to initialize...');
+            await new Promise(r => setTimeout(r, 5000));
+            
             // Use Smart Wait (Max 3 mins)
             await smartWait(page, 180000);
 
@@ -584,8 +604,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file5 = await waitForDownloadAndRename(downloadPath, `Report5_ForbiddenParking_Att${attempt}.xls`);
             
-            if (fs.existsSync(file5) && fs.statSync(file5).size < 1024) {
-                console.warn(`   ⚠️ Report 5 File size < 1KB (${fs.statSync(file5).size} bytes). Retrying...`);
+            if (fs.existsSync(file5) && fs.statSync(file5).size < 300) {
+                console.warn(`   ⚠️ Report 5 File size < 300 bytes (${fs.statSync(file5).size} bytes). Retrying...`);
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 5.`);
             } else {
                 console.log(`   ✅ File size OK (${fs.statSync(file5).size} bytes).`);
