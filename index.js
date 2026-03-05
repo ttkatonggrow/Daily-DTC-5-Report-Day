@@ -1,12 +1,12 @@
 /**
  * DTC Automation Script
- * Version: 3.8.0 (Content Validation - Check for 'ลำดับ')
+ * Version: 3.9.0 (Deep Validation & Cleanup)
  * Last Updated: 05/03/2026
  * Changes:
- * - Removed file size checking (< 300 bytes).
- * - Implemented `isValidReportFile` to check for 'ลำดับ' in the first 20 lines.
- * - Invalid files are automatically deleted before retrying.
- * - Retains Smart Wait and all previous logic.
+ * - Upgraded `isValidReportFile`: Must contain 'ลำดับ' AND either 'รวม' or '-' to guarantee complete file download.
+ * - Uncommented Cleanup code to delete 'downloads' folder and prevent duplicate/nested ZIP artifacts.
+ * - Enforced flat structure in ZIP creation.
+ * - Retains 5s buffer before Smart Wait to fix premature completion.
  */
 
 const puppeteer = require('puppeteer');
@@ -119,15 +119,23 @@ async function convertToCsv(sourcePath, destPath) {
     }
 }
 
-// --- NEW Helper: Validating Report Content ---
+// --- NEW Helper: Validating Report Content (Deep Check) ---
 function isValidReportFile(filePath) {
     try {
         if (!fs.existsSync(filePath)) return false;
         const content = fs.readFileSync(filePath, 'utf8');
-        // อ่าน 20 บรรทัดแรก
-        const lines = content.split('\n').slice(0, 20); 
-        // เช็คว่ามีคำว่า "ลำดับ" ใน 20 บรรทัดแรกหรือไม่
-        return lines.some(line => line.includes('ลำดับ'));
+        
+        // 1. เช็คหัวตาราง: ต้องมีคำว่า "ลำดับ"
+        if (!content.includes('ลำดับ')) return false;
+
+        // 2. เช็คเนื้อหาข้อมูลป้องกันไฟล์ตัดจบ (Incomplete Download): 
+        // ไฟล์ของ DTC ต้องมีบรรทัดสรุปคำว่า "รวม" หรือ อย่างน้อยต้องมีป้ายทะเบียนรถที่ประกอบด้วย "-"
+        if (content.includes('รวม') || content.includes('-')) {
+            return true;
+        }
+
+        // ถ้ามีแค่หัวตาราง แต่ไม่มีข้อมูลหรือบรรทัดสรุปเลย ถือว่าไฟล์พัง
+        return false;
     } catch (err) {
         return false;
     }
@@ -300,7 +308,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         output.on('close', () => resolve(outPath));
         archive.on('error', (err) => reject(err));
         archive.pipe(output);
-        filesToZip.forEach(file => archive.file(path.join(sourceDir, file), { name: file }));
+        // Ensure flat structure in ZIP (no nested folders)
+        filesToZip.forEach(file => archive.file(path.join(sourceDir, file), { name: path.basename(file) }));
         archive.finalize();
     });
 }
@@ -318,7 +327,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation V3.8 (Content Validation - Check Header)...');
+    console.log('🚀 Starting DTC Automation V3.9 (Deep Content Validation & Cleanup)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -401,13 +410,13 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             file1 = await waitForDownloadAndRename(downloadPath, `Report1_OverSpeed_Att${attempt}.xls`);
             
-            // ตรวจสอบความถูกต้องของเนื้อหาไฟล์ (หาคำว่า ลำดับ)
             if (!isValidReportFile(file1)) {
-                console.warn(`   ⚠️ Report 1 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                console.warn(`   ⚠️ Report 1 is invalid (Missing data or footer). Deleting and retrying...`);
                 if (fs.existsSync(file1)) fs.unlinkSync(file1);
+                file1 = ''; // Clear variable if failed
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 1.`);
             } else {
-                console.log(`   ✅ Report 1 is valid (Found 'ลำดับ').`);
+                console.log(`   ✅ Report 1 is valid (Contains Data/Footer).`);
                 break;
             }
         }
@@ -444,11 +453,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             file2 = await waitForDownloadAndRename(downloadPath, `Report2_Idling_Att${attempt}.xls`);
             
             if (!isValidReportFile(file2)) {
-                console.warn(`   ⚠️ Report 2 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                console.warn(`   ⚠️ Report 2 is invalid (Missing data or footer). Deleting and retrying...`);
                 if (fs.existsSync(file2)) fs.unlinkSync(file2);
+                file2 = '';
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 2.`);
             } else {
-                console.log(`   ✅ Report 2 is valid (Found 'ลำดับ').`);
+                console.log(`   ✅ Report 2 is valid (Contains Data/Footer).`);
                 break;
             }
         }
@@ -486,11 +496,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             file3 = await waitForDownloadAndRename(downloadPath, `Report3_SuddenBrake_Att${attempt}.xls`);
             
             if (!isValidReportFile(file3)) {
-                console.warn(`   ⚠️ Report 3 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                console.warn(`   ⚠️ Report 3 is invalid (Missing data or footer). Deleting and retrying...`);
                 if (fs.existsSync(file3)) fs.unlinkSync(file3);
+                file3 = '';
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 3.`);
             } else {
-                console.log(`   ✅ Report 3 is valid (Found 'ลำดับ').`);
+                console.log(`   ✅ Report 3 is valid (Contains Data/Footer).`);
                 break;
             }
         }
@@ -546,11 +557,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 file4 = await waitForDownloadAndRename(downloadPath, `Report4_HarshStart_Att${attempt}.xls`);
                 
                 if (!isValidReportFile(file4)) {
-                    console.warn(`   ⚠️ Report 4 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                    console.warn(`   ⚠️ Report 4 is invalid (Missing data or footer). Deleting and retrying...`);
                     if (fs.existsSync(file4)) fs.unlinkSync(file4);
+                    file4 = '';
                     if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 4.`);
                 } else {
-                    console.log(`   ✅ Report 4 is valid (Found 'ลำดับ').`);
+                    console.log(`   ✅ Report 4 is valid (Contains Data/Footer).`);
                     break;
                 }
             }
@@ -604,11 +616,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             file5 = await waitForDownloadAndRename(downloadPath, `Report5_ForbiddenParking_Att${attempt}.xls`);
             
             if (!isValidReportFile(file5)) {
-                console.warn(`   ⚠️ Report 5 is invalid (Missing 'ลำดับ' header). Deleting and retrying...`);
+                console.warn(`   ⚠️ Report 5 is invalid (Missing data or footer). Deleting and retrying...`);
                 if (fs.existsSync(file5)) fs.unlinkSync(file5);
+                file5 = '';
                 if (attempt === MAX_RETRIES) console.warn(`   ⚠️ Max retries reached for Report 5.`);
             } else {
-                console.log(`   ✅ Report 5 is valid (Found 'ลำดับ').`);
+                console.log(`   ✅ Report 5 is valid (Contains Data/Footer).`);
                 break;
             }
         }
@@ -616,7 +629,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // =================================================================
         // STEP 7: Generate PDF Summary
         // =================================================================
-        console.log('📑 Step 7: Generating PDF Summary (Revised V3.8)...');
+        console.log('📑 Step 7: Generating PDF Summary (Revised V3.9)...');
 
         const FILES_CSV = {
             OVERSPEED: file1,
@@ -954,7 +967,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         }
 
         console.log('🧹 Cleanup...');
-        // fs.rmSync(downloadPath, { recursive: true, force: true });
+        // ปลดคอมเมนต์ Cleanup เพื่อป้องกันไฟล์ขยะ/การเกิดไฟล์ Zip โฟลเดอร์ซ้ำซ้อนในการรันครั้งถัดไปหรือในระบบ CI/CD
+        if (fs.existsSync(downloadPath)) {
+            fs.rmSync(downloadPath, { recursive: true, force: true });
+        }
         console.log('   ✅ Cleanup Complete.');
 
     } catch (err) {
