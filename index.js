@@ -1,12 +1,12 @@
 /**
  * DTC Automation Script
- * Version: 4.0.0 (Step 7 Bulletproof & Deep Validation)
+ * Version: 4.1.0 (PDF Timeout, Strict String, No Optional Chaining)
  * Last Updated: 05/03/2026
  * Changes:
- * - Bulletproofed Step 7 against empty file paths ('') to prevent TypeError.
- * - Added early returns and safe guards in `processCSV_V3` and `isValidReportFile`.
- * - Changed PDF `setContent` to `domcontentloaded` to prevent Google Fonts timeout errors.
- * - Retains Smart Wait, Content Validation, and Cleanup logic.
+ * - Replaced domcontentloaded with networkidle2 and 60s timeout for PDF.
+ * - Removed all optional chaining (?.) to support older Node.js versions.
+ * - Enforced String() conversions to prevent null errors in CSV processing.
+ * - Added error handling/deletion attempt for locked PDF files.
  */
 
 const puppeteer = require('puppeteer');
@@ -84,7 +84,7 @@ async function convertToCsv(sourcePath, destPath) {
                 const rowValues = Array.isArray(row.values) ? row.values.slice(1) : [];
                 rows.push(rowValues.map(v => {
                     if (v === null || v === undefined) return '';
-                    if (typeof v === 'object') return v.text || v.result || '';
+                    if (typeof v === 'object') return String(v.text || v.result || '');
                     return String(v).trim();
                 }));
             });
@@ -274,22 +274,22 @@ function processCSV_V3(filePath, config) {
         const results = [];
 
         dataRows.forEach(row => {
-            const license = row[config.colLicense] ? row[config.colLicense].trim() : '';
+            const license = row[config.colLicense] ? String(row[config.colLicense]).trim() : '';
 
             if (license && license.includes('-')) {
                 const item = { license };
 
                 if (config.useTimeCalc && config.colStart !== undefined && config.colEnd !== undefined) {
-                    const t1 = parseDateTimeToSeconds(row[config.colStart]); 
-                    const t2 = parseDateTimeToSeconds(row[config.colEnd]);   
+                    const t1 = parseDateTimeToSeconds(String(row[config.colStart] || '')); 
+                    const t2 = parseDateTimeToSeconds(String(row[config.colEnd] || ''));   
                     item.durationSec = (t2 > t1) ? (t2 - t1) : 0;
                     item.durationStr = formatSeconds(item.durationSec);
                 }
                 
-                if (config.colDate !== undefined) item.date = row[config.colDate];
-                if (config.colStation !== undefined) item.station = row[config.colStation];
-                if (config.colSpeedStart !== undefined) item.v_start = row[config.colSpeedStart];
-                if (config.colSpeedEnd !== undefined) item.v_end = row[config.colSpeedEnd];
+                if (config.colDate !== undefined) item.date = String(row[config.colDate] || '');
+                if (config.colStation !== undefined) item.station = String(row[config.colStation] || '');
+                if (config.colSpeedStart !== undefined) item.v_start = String(row[config.colSpeedStart] || '');
+                if (config.colSpeedEnd !== undefined) item.v_end = String(row[config.colSpeedEnd] || '');
 
                 results.push(item);
             }
@@ -403,8 +403,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 1 (Attempt ${attempt}/${MAX_RETRIES})...`);
             await page.evaluate(() => {
-                if(typeof sertch_data === 'function') sertch_data();
-                else document.querySelector("span[onclick='sertch_data();']").click();
+                if(typeof sertch_data === 'function') {
+                    sertch_data();
+                } else {
+                    var btn = document.querySelector("span[onclick='sertch_data();']");
+                    if (btn) btn.click();
+                }
             });
 
             console.log('   ⏳ Waiting 5s for request to initialize...');
@@ -414,7 +418,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             try { await page.waitForSelector('#btnexport', { visible: true, timeout: 30000 }); } catch(e) {}
             console.log('   Exporting Report 1...');
-            await page.evaluate(() => document.getElementById('btnexport').click());
+            await page.evaluate(() => {
+                var btn = document.getElementById('btnexport');
+                if (btn) btn.click();
+            });
             
             file1 = await waitForDownloadAndRename(downloadPath, `Report1_OverSpeed_Att${attempt}.xls`);
             
@@ -448,7 +455,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file2 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 2 (Attempt ${attempt}/${MAX_RETRIES})...`);
-            await page.click('td:nth-of-type(6) > span');
+            await page.evaluate(() => {
+                var btn = document.querySelector('td:nth-of-type(6) > span');
+                if (btn) btn.click();
+            });
             
             console.log('   ⏳ Waiting 5s for request to initialize...');
             await new Promise(r => setTimeout(r, 5000));
@@ -456,7 +466,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             await smartWait(page, 180000);
 
             try { await page.waitForSelector('#btnexport', { visible: true, timeout: 30000 }); } catch(e) {}
-            await page.evaluate(() => document.getElementById('btnexport').click());
+            await page.evaluate(() => {
+                var btn = document.getElementById('btnexport');
+                if (btn) btn.click();
+            });
             
             file2 = await waitForDownloadAndRename(downloadPath, `Report2_Idling_Att${attempt}.xls`);
             
@@ -488,7 +501,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file3 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 3 (Attempt ${attempt}/${MAX_RETRIES})...`);
-            await page.click('td:nth-of-type(6) > span');
+            await page.evaluate(() => {
+                var btn = document.querySelector('td:nth-of-type(6) > span');
+                if (btn) btn.click();
+            });
             
             console.log('   ⏳ Waiting 5s for request to initialize...');
             await new Promise(r => setTimeout(r, 5000));
@@ -498,7 +514,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             await page.evaluate(() => {
                 const btns = Array.from(document.querySelectorAll('button'));
                 const b = btns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
-                if (b) b.click(); else document.querySelector('#table button:nth-of-type(3)')?.click();
+                if (b) {
+                    b.click();
+                } else {
+                    var fallbackBtn = document.querySelector('#table button:nth-of-type(3)');
+                    if (fallbackBtn) fallbackBtn.click();
+                }
             });
             
             file3 = await waitForDownloadAndRename(downloadPath, `Report3_SuddenBrake_Att${attempt}.xls`);
@@ -543,7 +564,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
                 console.log(`   Searching Report 4 (Attempt ${attempt}/${MAX_RETRIES})...`);
                 await page.evaluate(() => {
-                    if (typeof sertch_data === 'function') { sertch_data(); } else { document.querySelector('td:nth-of-type(6) > span').click(); }
+                    if (typeof sertch_data === 'function') { 
+                        sertch_data(); 
+                    } else { 
+                        var btn = document.querySelector('td:nth-of-type(6) > span');
+                        if (btn) btn.click(); 
+                    }
                 });
 
                 console.log('   ⏳ Waiting 5s for request to initialize...');
@@ -554,11 +580,13 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 await page.evaluate(() => {
                     const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
                     const btn = xpathResult.singleNodeValue;
-                    if (btn) btn.click();
-                    else {
+                    if (btn) {
+                        btn.click();
+                    } else {
                         const allBtns = Array.from(document.querySelectorAll('button'));
                         const excelBtn = allBtns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
-                        if (excelBtn) excelBtn.click(); else throw new Error("Cannot find Export button for Report 4");
+                        if (excelBtn) excelBtn.click(); 
+                        else console.warn("Cannot find Export button for Report 4");
                     }
                 });
                 
@@ -611,7 +639,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file5 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 5 (Attempt ${attempt}/${MAX_RETRIES})...`);
-            await page.click('td:nth-of-type(7) > span');
+            await page.evaluate(() => {
+                var btn = document.querySelector('td:nth-of-type(7) > span');
+                if (btn) btn.click();
+            });
             
             console.log('   ⏳ Waiting 5s for request to initialize...');
             await new Promise(r => setTimeout(r, 5000));
@@ -619,7 +650,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             await smartWait(page, 180000);
 
             try { await page.waitForSelector('#btnexport', { visible: true, timeout: 30000 }); } catch(e) {}
-            await page.evaluate(() => document.getElementById('btnexport').click());
+            await page.evaluate(() => {
+                var btn = document.getElementById('btnexport');
+                if (btn) btn.click();
+            });
             
             file5 = await waitForDownloadAndRename(downloadPath, `Report5_ForbiddenParking_Att${attempt}.xls`);
             
@@ -789,7 +823,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                     <div class="bar-row">
                     <div class="bar-label">${item.license}</div>
                     <div class="bar-track">
-                        <div class="bar-fill" style="width: ${(item.time / (topSpeed[0]?.time || 1)) * 100}%; background: #1E40AF;">${formatSeconds(item.time)}</div>
+                        <div class="bar-fill" style="width: ${(item.time / (topSpeed[0] && topSpeed[0].time > 0 ? topSpeed[0].time : 1)) * 100}%; background: #1E40AF;">${formatSeconds(item.time)}</div>
                     </div>
                     </div>
                 `).join('')}
@@ -823,7 +857,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                     <div class="bar-row">
                     <div class="bar-label">${item.license}</div>
                     <div class="bar-track">
-                        <div class="bar-fill" style="width: ${(item.time / (topIdle[0]?.time || 1)) * 100}%; background: #F59E0B;">${formatSeconds(item.time)}</div>
+                        <div class="bar-fill" style="width: ${(item.time / (topIdle[0] && topIdle[0].time > 0 ? topIdle[0].time : 1)) * 100}%; background: #F59E0B;">${formatSeconds(item.time)}</div>
                     </div>
                     </div>
                 `).join('')}
@@ -900,7 +934,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                     <div class="bar-row">
                     <div class="bar-label">${item.license}</div>
                     <div class="bar-track">
-                        <div class="bar-fill" style="width: ${(item.time / (topForbiddenChart[0]?.time || 1)) * 100}%; background: #9333EA;">${formatSeconds(item.time)}</div>
+                        <div class="bar-fill" style="width: ${(item.time / (topForbiddenChart[0] && topForbiddenChart[0].time > 0 ? topForbiddenChart[0].time : 1)) * 100}%; background: #9333EA;">${formatSeconds(item.time)}</div>
                     </div>
                     </div>
                 `).join('')}
@@ -929,13 +963,24 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         `;
 
         try {
-            // เปลี่ยนจาก networkidle0 เป็น domcontentloaded ป้องกัน Error Timeout เวลาดึง Font นานเกินไป
-            await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 60000 });
             const pdfPath = path.join(downloadPath, 'Fleet_Safety_Analysis_Report.pdf');
+            
+            // ดักจับ Error ไฟล์เปิดค้าง พยายามลบไฟล์เก่าก่อนเพื่อป้องกันเซฟทับไม่ได้
+            if (fs.existsSync(pdfPath)) {
+                try {
+                    fs.unlinkSync(pdfPath);
+                } catch (delErr) {
+                    console.warn(`   ⚠️ Warning: Cannot delete existing PDF (might be open). Overwrite might fail: ${delErr.message}`);
+                }
+            }
+
+            // เปลี่ยนเป็น networkidle2 และบังคับ Timeout 60วิ ป้องกัน Google Fonts ทำค้าง
+            await page.setContent(html, { waitUntil: 'networkidle2', timeout: 60000 });
             await page.pdf({
                 path: pdfPath,
                 format: 'A4',
-                printBackground: true
+                printBackground: true,
+                timeout: 60000 // บังคับตัดจบค้างตอน Render PDF
             });
             console.log(`   ✅ PDF Generated: ${pdfPath}`);
         } catch (pdfErr) {
