@@ -1,11 +1,12 @@
 /**
  * DTC Automation Script
  * Base Version: 3.4.0
- * Update: Added Vehicle Data Validation & 3-Retry Loop
+ * Update: Added Vehicle Data Validation + Fast Wait (Anti-Hang)
  * Changes:
+ * - Replaced Hard Waits (3-5 mins) with `checkAndWait` to speed up execution.
+ * - Detects 'ไม่พบข้อมูล' (No data) on the webpage and skips to prevent infinite delays.
  * - Checks specifically for '-' in the license plate column to ensure valid data.
- * - Retries searching and downloading up to 3 times if data is missing or file is corrupted.
- * - Retains original 3.4.0 logic (Hard Waits, HTML generation, etc.).
+ * - Retries searching and downloading up to 3 times if data is missing or corrupted.
  */
 
 const puppeteer = require('puppeteer');
@@ -19,11 +20,11 @@ const ExcelJS = require('exceljs');
 
 // --- Helper Functions ---
 
-// 1. ฟังก์ชันรอโหลดไฟล์ และแปลงเป็น CSV
-async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 300000) {
+// 1. ฟังก์ชันรอโหลดไฟล์ และแปลงเป็น CSV (ลดเวลา Default ลงเพราะเราใช้ checkAndWait รอเว็บประมวลผลไปแล้ว)
+async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 120000) {
     console.log(`   Waiting for download: ${newFileName}...`);
     let downloadedFile = null;
-    const checkInterval = 10000; 
+    const checkInterval = 5000; 
     let waittime = 0;
 
     while (waittime < maxWaitMs) {
@@ -46,7 +47,7 @@ async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 3
 
     if (!downloadedFile) throw new Error(`Download timeout for ${newFileName}`);
 
-    await new Promise(resolve => setTimeout(resolve, 10000));
+    await new Promise(resolve => setTimeout(resolve, 5000)); // รอไฟล์เขียนเสร็จ
 
     const oldPath = path.join(downloadPath, downloadedFile);
     const finalFileName = `DTC_Completed_${newFileName}`;
@@ -119,7 +120,7 @@ async function convertToCsv(sourcePath, destPath) {
 }
 
 // --- NEW Helper: Validating Vehicle Data ---
-// ฟังก์ชันนี้จะเช็คว่าในคอลัมน์ที่ระบุ มีทะเบียนรถ (ที่มีขีดกลาง "-") ออกมาหรือไม่
+// ตรวจสอบว่าในไฟล์มีข้อมูลทะเบียนรถ (เช็คจากเครื่องหมาย "-") หรือไม่
 function validateVehicleData(filePath, colIndex) {
     try {
         if (!filePath || filePath === '') return false;
@@ -130,7 +131,7 @@ function validateVehicleData(filePath, colIndex) {
         const rows = parse(fileContent, {
             columns: false,
             skip_empty_lines: true,
-            relax_column_count: true, // ป้องกัน Error จาก Footer ไม่สมบูรณ์
+            relax_column_count: true, 
             bom: true
         });
 
@@ -148,11 +149,10 @@ function validateVehicleData(filePath, colIndex) {
             return false;
         }
 
-        // 2. เช็คข้อมูลทะเบียนรถ
+        // 2. เช็คข้อมูลคอลัมน์ทะเบียนรถว่ามี '-' โผล่มาหรือไม่
         const dataRows = rows.slice(headerIndex + 1);
         for (const row of dataRows) {
             const license = row[colIndex] ? String(row[colIndex]).trim() : '';
-            // ถ้าเจอเครื่องหมาย "-" ในคอลัมน์ที่กำหนด ถือว่าไฟล์นี้มีข้อมูลจริง ผ่านได้เลย
             if (license && license.includes('-')) {
                 return true; 
             }
@@ -164,6 +164,73 @@ function validateVehicleData(filePath, colIndex) {
         console.error(`   ❌ Validation Error:`, err.message);
         return false;
     }
+}
+
+// --- NEW Helper: Fast Wait & Empty Check ---
+// เช็คสถานะหน้าเว็บเพื่อลดเวลาการรอ และดักจับกรณี "ไม่พบข้อมูล"
+async function checkAndWait(page, maxWaitMs) {
+    console.log(`   ⏳ Waiting for system to process (Max ${maxWaitMs/1000}s)...`);
+    const startTime = Date.now();
+    let isEmpty = false;
+
+    // Buffer เริ่มต้นเพื่อให้เว็บดึง Loader ขึ้นมา
+    await new Promise(r => setTimeout(r, 3000));
+
+    while (Date.now() - startTime < maxWaitMs) {
+        const status = await page.evaluate(() => {
+            // 1. เช็คว่ามี Spinner/Loader กำลังหมุนอยู่ไหม
+            const loaders = document.querySelectorAll('.blockUI, #loading, #loader, .loading, .spinner, .modal-backdrop');
+            for(let el of loaders) {
+                if(el.offsetParent !== null && window.getComputedStyle(el).display !== 'none') return { ready: false };
+            }
+
+            // 2. เช็คกรณีไม่มีข้อมูล
+            const bodyText = document.body.innerText;
+            if(bodyText.includes('ไม่พบข้อมูล') || bodyText.includes('No data found')) {
+                return { ready: true, empty: true };
+            }
+
+            // 3. เช็คว่าปุ่ม Export พร้อมกดหรือยัง
+            const btn = document.getElementById('btnexport');
+            if(btn && btn.offsetParent !== null && !btn.disabled) return { ready: true, empty: false };
+            
+            const btns = Array.from(document.querySelectorAll('button'));
+            const excelBtn = btns.find(b => (b.innerText.includes('Excel') || b.title === 'Excel') && b.offsetParent !== null);
+            if(excelBtn) return { ready: true, empty: false };
+
+            return { ready: false };
+        });
+
+        if (status.ready) {
+            const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
+            if (status.empty) {
+                console.log(`   ℹ️ System ready in ${timeTaken}s. Result: 'ไม่พบข้อมูล' (No Data).`);
+                isEmpty = true;
+            } else {
+                console.log(`   ⚡ Data ready in ${timeTaken}s!`);
+            }
+            await new Promise(r => setTimeout(r, 2000)); // Buffer ให้ UI นิ่งก่อนไปต่อ
+            break;
+        }
+        await new Promise(r => setTimeout(r, 2000));
+    }
+    return isEmpty;
+}
+
+// --- Helper: Clear Old Data ---
+// ล้างข้อความเก่าทิ้งป้องกันการโดนหลอกในรอบถัดไป
+async function prepareBeforeSearch(page) {
+    await page.evaluate(() => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+        let node;
+        const nodesToRemove = [];
+        while (node = walker.nextNode()) {
+            if (node.nodeValue.includes('ไม่พบข้อมูล') || node.nodeValue.includes('No data found')) {
+                nodesToRemove.push(node);
+            }
+        }
+        nodesToRemove.forEach(n => n.nodeValue = '');
+    });
 }
 
 // --- Helper: Parse Date ---
@@ -201,7 +268,6 @@ function formatSeconds(totalSeconds) {
 // --- FUNCTION: Process CSV V3 ---
 function processCSV_V3(filePath, config) {
     try {
-        // ดัก Error กรณีไฟล์พังหรือดึงข้อมูลไม่สำเร็จเลยทั้ง 3 รอบ
         if (!filePath || filePath === '') return [];
         if (!fs.existsSync(filePath)) return [];
 
@@ -287,7 +353,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Base 3.4.0 + Data Validation)...');
+    console.log('🚀 Starting DTC Automation (Base 3.4.0 + Fast Validation)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -304,7 +370,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     await page.setViewport({ width: 1920, height: 1080 });
     await page.emulateTimezone('Asia/Bangkok');
 
-    const MAX_RETRIES = 3; // กำหนดทำซ้ำสูงสุด 3 รอบ
+    const MAX_RETRIES = 3; 
 
     try {
         // Step 1: Login
@@ -354,21 +420,28 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file1 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 1 (Attempt ${attempt}/${MAX_RETRIES})...`);
+            await prepareBeforeSearch(page);
             await page.evaluate(() => {
                 if(typeof sertch_data === 'function') sertch_data();
                 else document.querySelector("span[onclick='sertch_data();']").click();
             });
 
-            console.log('   ⏳ Waiting 5 mins...');
-            await new Promise(resolve => setTimeout(resolve, 300000)); // Hard wait 5 mins
+            // ใช้ Fast Wait ลดการรอคอย
+            const isEmpty = await checkAndWait(page, 300000); 
+            if (isEmpty) {
+                console.log(`   ⏩ Skipping Report 1 (No data found).`);
+                break; // ไม่มีข้อมูล ก็ข้ามเลย
+            }
             
-            try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
             console.log('   Exporting Report 1...');
-            await page.evaluate(() => document.getElementById('btnexport').click());
+            await page.evaluate(() => {
+                const btn = document.getElementById('btnexport');
+                if (btn) btn.click();
+            });
             
             file1 = await waitForDownloadAndRename(downloadPath, `Report1_OverSpeed_Att${attempt}.xls`);
             
-            // เช็คคอลัมน์ที่ 1 (ชื่อรถ/ทะเบียนรถ) ว่ามีข้อมูล "-" หรือไม่
+            // เช็คว่าคอลัมน์ Index 1 มีป้ายทะเบียน "-" หรือไม่
             if (validateVehicleData(file1, 1)) {
                 console.log(`   ✅ Report 1 is valid (Found vehicle data).`);
                 break;
@@ -398,10 +471,23 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file2 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 2 (Attempt ${attempt}/${MAX_RETRIES})...`);
-            await page.click('td:nth-of-type(6) > span');
-            console.log('   ⏳ Waiting 3 mins (Strict)...');
-            await new Promise(r => setTimeout(r, 180000));
-            await page.evaluate(() => document.getElementById('btnexport').click());
+            await prepareBeforeSearch(page);
+            await page.evaluate(() => {
+                const btn = document.querySelector('td:nth-of-type(6) > span');
+                if (btn) btn.click();
+            });
+            
+            const isEmpty = await checkAndWait(page, 180000); 
+            if (isEmpty) {
+                console.log(`   ⏩ Skipping Report 2 (No data found).`);
+                break;
+            }
+
+            console.log('   Exporting Report 2...');
+            await page.evaluate(() => {
+                const btn = document.getElementById('btnexport');
+                if (btn) btn.click();
+            });
             
             file2 = await waitForDownloadAndRename(downloadPath, `Report2_Idling_Att${attempt}.xls`);
             
@@ -432,13 +518,28 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file3 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 3 (Attempt ${attempt}/${MAX_RETRIES})...`);
-            await page.click('td:nth-of-type(6) > span');
-            console.log('   ⏳ Waiting 3 mins (Strict)...'); 
-            await new Promise(r => setTimeout(r, 180000)); 
+            await prepareBeforeSearch(page);
+            await page.evaluate(() => {
+                const btn = document.querySelector('td:nth-of-type(6) > span');
+                if (btn) btn.click();
+            });
+            
+            const isEmpty = await checkAndWait(page, 180000); 
+            if (isEmpty) {
+                console.log(`   ⏩ Skipping Report 3 (No data found).`);
+                break;
+            }
+
+            console.log('   Exporting Report 3...');
             await page.evaluate(() => {
                 const btns = Array.from(document.querySelectorAll('button'));
                 const b = btns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
-                if (b) b.click(); else document.querySelector('#table button:nth-of-type(3)')?.click();
+                if (b) {
+                    b.click();
+                } else {
+                    const fallbackBtn = document.querySelector('#table button:nth-of-type(3)');
+                    if (fallbackBtn) fallbackBtn.click();
+                }
             });
             
             file3 = await waitForDownloadAndRename(downloadPath, `Report3_SuddenBrake_Att${attempt}.xls`);
@@ -481,21 +582,32 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             
             for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
                 console.log(`   Searching Report 4 (Attempt ${attempt}/${MAX_RETRIES})...`);
+                await prepareBeforeSearch(page);
                 await page.evaluate(() => {
-                    if (typeof sertch_data === 'function') { sertch_data(); } else { document.querySelector('td:nth-of-type(6) > span').click(); }
+                    if (typeof sertch_data === 'function') { 
+                        sertch_data(); 
+                    } else { 
+                        const btn = document.querySelector('td:nth-of-type(6) > span');
+                        if (btn) btn.click(); 
+                    }
                 });
                 
-                console.log('   ⏳ Waiting 3 mins (Strict)...');
-                await new Promise(r => setTimeout(r, 180000));
+                const isEmpty = await checkAndWait(page, 180000); 
+                if (isEmpty) {
+                    console.log(`   ⏩ Skipping Report 4 (No data found).`);
+                    break;
+                }
                 
+                console.log('   Exporting Report 4...');
                 await page.evaluate(() => {
                     const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
                     const btn = xpathResult.singleNodeValue;
-                    if (btn) btn.click();
-                    else {
+                    if (btn) {
+                        btn.click();
+                    } else {
                         const allBtns = Array.from(document.querySelectorAll('button'));
                         const excelBtn = allBtns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
-                        if (excelBtn) excelBtn.click(); else throw new Error("Cannot find Export button for Report 4");
+                        if (excelBtn) excelBtn.click();
                     }
                 });
                 
@@ -547,15 +659,28 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         let file5 = '';
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             console.log(`   Searching Report 5 (Attempt ${attempt}/${MAX_RETRIES})...`);
-            await page.click('td:nth-of-type(7) > span');
-            console.log('   ⏳ Waiting 3 mins (Strict)...');
-            await new Promise(r => setTimeout(r, 180000));
-            try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
-            await page.evaluate(() => document.getElementById('btnexport').click());
+            await prepareBeforeSearch(page);
+            await page.evaluate(() => {
+                const btn = document.querySelector('td:nth-of-type(7) > span');
+                if (btn) btn.click();
+            });
+            
+            const isEmpty = await checkAndWait(page, 180000); 
+            if (isEmpty) {
+                console.log(`   ⏩ Skipping Report 5 (No data found).`);
+                break;
+            }
+
+            console.log('   Exporting Report 5...');
+            try { await page.waitForSelector('#btnexport', { visible: true, timeout: 10000 }); } catch(e) {}
+            await page.evaluate(() => {
+                const btn = document.getElementById('btnexport');
+                if (btn) btn.click();
+            });
             
             file5 = await waitForDownloadAndRename(downloadPath, `Report5_ForbiddenParking_Att${attempt}.xls`);
             
-            // ใน V3.4 Report 5 จะนำข้อมูลคอลัมน์ Index 2 ไปใช้งาน (อ้างอิงจาก colLicense: 2)
+            // ใน V3.4 Report 5 นำข้อมูลคอลัมน์ Index 2 ไปใช้งาน จึงตรวจจับที่ colIndex 2
             if (validateVehicleData(file5, 2)) {
                 console.log(`   ✅ Report 5 is valid (Found vehicle data).`);
                 break;
