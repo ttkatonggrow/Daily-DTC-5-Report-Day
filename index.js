@@ -435,14 +435,40 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     try {
         // Step 1: Login
         console.log('1️⃣ Step 1: Login...');
-        await page.goto('https://gps.dtc.co.th/ultimate/index.php', { waitUntil: 'domcontentloaded' });
+        
+        // --- ดักจับและกดยอมรับ Popup อัตโนมัติ (เช่น กรณีล็อกอินซ้อน) ---
+        page.on('dialog', async dialog => {
+            console.log(`   ⚠️ Dialog Popup detected: ${dialog.message()}`);
+            await dialog.accept(); // กด OK ให้ทันที
+        });
+
+        // เปลี่ยนเป็น networkidle2 เพื่อให้มั่นใจว่าไฟล์พื้นฐานของเว็บโหลดเสร็จจริงๆ
+        await page.goto('https://gps.dtc.co.th/ultimate/index.php', { waitUntil: 'networkidle2', timeout: 60000 });
+        
         await page.waitForSelector('#txtname', { visible: true, timeout: 60000 });
+        
+        // ล้างค่าในช่องกรอก (เผื่อเว็บจำค่าเก่าไว้) แล้วค่อยพิมพ์
+        await page.evaluate(() => {
+            document.getElementById('txtname').value = '';
+            document.getElementById('txtpass').value = '';
+        });
+
         await page.type('#txtname', DTC_USERNAME);
         await page.type('#txtpass', DTC_PASSWORD);
-        await Promise.all([
-            page.evaluate(() => document.getElementById('btnLogin').click()),
-            page.waitForFunction(() => !document.querySelector('#txtname'), { timeout: 60000 })
-        ]);
+        
+        console.log('   Clicking Login...');
+        
+        // กดปุ่มแล้วรอให้หน้าเว็บเปลี่ยน (รอ Navigation)
+        const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+        await page.click('#btnLogin');
+        await navPromise;
+
+        // เช็คยืนยันอีกรอบว่าผ่านหน้าล็อกอินมาได้จริงๆ (ช่องกรอก Username ต้องหายไป)
+        const stillOnLogin = await page.$('#txtname');
+        if (stillOnLogin) {
+            throw new Error('Login failed. Still on login page (Check Username/Password or Server status).');
+        }
+
         console.log('✅ Login Success');
 
         const todayStr = getTodayFormatted();
