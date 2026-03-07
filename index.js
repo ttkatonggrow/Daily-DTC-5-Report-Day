@@ -436,17 +436,6 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // Step 1: Login
         console.log('1️⃣ Step 1: Login...');
         
-        // --- ดักจับและกดยอมรับ Popup อัตโนมัติ (เช่น กรณีล็อกอินซ้อน) ---
-        page.on('dialog', async dialog => {
-            console.log(`   ⚠️ Dialog Popup detected: ${dialog.message()}`);
-            await dialog.accept(); // กด OK ให้ทันที
-        });
-
-        // เปลี่ยนเป็น networkidle2 เพื่อให้มั่นใจว่าไฟล์พื้นฐานของเว็บโหลดเสร็จจริงๆ
-        await page.goto('https://gps.dtc.co.th/ultimate/index.php', { waitUntil: 'networkidle2', timeout: 60000 });
-        
-        await page.waitForSelector('#txtname', { visible: true, timeout: 60000 });
-        
         // ล้างค่าในช่องกรอก (เผื่อเว็บจำค่าเก่าไว้) แล้วค่อยพิมพ์
         await page.evaluate(() => {
             document.getElementById('txtname').value = '';
