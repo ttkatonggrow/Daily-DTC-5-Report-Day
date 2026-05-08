@@ -1,11 +1,11 @@
 /**
  * DTC Automation Script
- * Version: 3.5.0 (Add Retry Loop for Empty License Data)
- * Last Updated: 07/03/2026
+ * Version: 3.7.0 (Day Shift + Retry Search + Fix Report 5 J Column)
+ * Last Updated: 08/05/2026
  * Changes:
  * - Fix 'file4' scope issue causing Harsh Start data to be missing in PDF
- * - Add validation function `checkValidLicense` to detect valid license plates
- * - Implement max 3 retries for Search -> Export if license plate has no numbers
+ * - Add validation function `checkValidLicense` to detect valid license plates (Max 3 Retries)
+ * - FIX Report 5: Calculate total duration directly from Column J instead of Exit-Enter time
  */
 
 const puppeteer = require('puppeteer');
@@ -182,6 +182,28 @@ function parseDateTimeToSeconds(dateStr) {
     return date.getTime() / 1000;
 }
 
+// --- Helper: Parse Duration String (HH:MM:SS) to Seconds ---
+function parseDurationToSeconds(str) {
+    if (!str) return 0;
+    // รองรับรูปแบบ "1 วัน 02:30:00" หรือ "02:30:00"
+    const match = String(str).match(/(?:(\d+)\s*วัน\s*)?(\d{1,2}):(\d{1,2}):(\d{1,2})/);
+    if (match) {
+        const days = parseInt(match[1] || 0);
+        const hours = parseInt(match[2] || 0);
+        const mins = parseInt(match[3] || 0);
+        const secs = parseInt(match[4] || 0);
+        return (days * 86400) + (hours * 3600) + (mins * 60) + secs;
+    }
+    // สำรองกรณีเป็นแค่นาทีและวินาที MM:SS หรือ HH:MM:SS ทั่วไป
+    const parts = String(str).trim().split(':');
+    if (parts.length === 3) {
+        return parseInt(parts[0] || 0) * 3600 + parseInt(parts[1] || 0) * 60 + parseInt(parts[2] || 0);
+    } else if (parts.length === 2) {
+        return parseInt(parts[0] || 0) * 60 + parseInt(parts[1] || 0);
+    }
+    return 0;
+}
+
 // --- Helper: Format Seconds to HH:MM:SS ---
 function formatSeconds(totalSeconds) {
     if (isNaN(totalSeconds)) return "00:00:00";
@@ -228,7 +250,13 @@ function processCSV_V3(filePath, config) {
             if (license && license.includes('-')) {
                 const item = { license };
 
-                if (config.useTimeCalc && config.colStart !== undefined && config.colEnd !== undefined) {
+                // หากระบุคอลัมน์ Duration มา (เช่นคอลัมน์ J) ให้ใช้จากคอลัมน์นี้โดยตรง
+                if (config.colDuration !== undefined) {
+                    item.durationSec = parseDurationToSeconds(row[config.colDuration]);
+                    item.durationStr = formatSeconds(item.durationSec);
+                } 
+                // หรือถ้าเป็นการลบเวลาปกติ
+                else if (config.useTimeCalc && config.colStart !== undefined && config.colEnd !== undefined) {
                     const t1 = parseDateTimeToSeconds(row[config.colStart]); 
                     const t2 = parseDateTimeToSeconds(row[config.colEnd]);   
                     item.durationSec = (t2 > t1) ? (t2 - t1) : 0;
@@ -283,7 +311,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation V3.5 (With Search Retry Loop)...');
+    console.log('🚀 Starting DTC Automation V3.7 (Day Shift With Search Retry Loop & Report 5 Fix)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -577,7 +605,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // =================================================================
         // STEP 7: Generate PDF Summary
         // =================================================================
-        console.log('📑 Step 7: Generating PDF Summary (Revised V3.5)...');
+        console.log('📑 Step 7: Generating PDF Summary (Revised V3.7)...');
 
         const FILES_CSV = {
             OVERSPEED: file1 || '',
@@ -638,12 +666,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             ...rawStart.map(r => ({ ...r, type: 'Harsh Start', level: r.date }))
         ];
 
+        // 4. Process Report 5: Prohibited (Use Column J instead of Exit-Enter)
+        // Logic: License=Col C(2), Station=Col E(4), Duration=Col J(9)
         const rawForbidden = processCSV_V3(FILES_CSV.PROHIBITED, {
             colLicense: 2,
             colStation: 4,
-            colStart: 5,  
-            colEnd: 6,    
-            useTimeCalc: true
+            colDuration: 9 // ชี้ให้ไปดึงข้อมูลเวลาจากคอลัมน์ J (Index 9)
         });
 
         const forbiddenList = rawForbidden
