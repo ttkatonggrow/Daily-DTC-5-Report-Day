@@ -182,28 +182,34 @@ function parseDateTimeToSeconds(dateStr) {
     return date.getTime() / 1000;
 }
 
-// --- Helper: Parse Duration String (HH:MM:SS) to Seconds ---
+// --- Helper: Parse Duration String (Day:Hour:Minute) to Seconds ---
 function parseDurationToSeconds(str) {
     if (!str) return 0;
-    // รองรับรูปแบบ "1 วัน 02:30:00" หรือ "02:30:00"
-    const match = String(str).match(/(?:(\d+)\s*วัน\s*)?(\d{1,2}):(\d{1,2}):(\d{1,2})/);
-    if (match) {
-        const days = parseInt(match[1] || 0);
-        const hours = parseInt(match[2] || 0);
-        const mins = parseInt(match[3] || 0);
-        const secs = parseInt(match[4] || 0);
-        return (days * 86400) + (hours * 3600) + (mins * 60) + secs;
-    }
-    // สำรองกรณีเป็นแค่นาทีและวินาที MM:SS หรือ HH:MM:SS ทั่วไป
-    const parts = String(str).trim().split(':');
+    
+    // ลบช่องว่างออก
+    const cleanStr = String(str).trim();
+    
+    // แยกข้อความด้วยเครื่องหมาย ':'
+    const parts = cleanStr.split(':');
+    
+    // รูปแบบที่ฐานข้อมูลให้มาคือ วัน:ชั่วโมง:นาที (D:HH:MM) เช่น 0:02:30 (0 วัน 2 ชั่วโมง 30 นาที)
     if (parts.length === 3) {
-        return parseInt(parts[0] || 0) * 3600 + parseInt(parts[1] || 0) * 60 + parseInt(parts[2] || 0);
-    } else if (parts.length === 2) {
-        return parseInt(parts[0] || 0) * 60 + parseInt(parts[1] || 0);
+        const days = parseInt(parts[0] || 0, 10);
+        const hours = parseInt(parts[1] || 0, 10);
+        const mins = parseInt(parts[2] || 0, 10);
+        
+        // แปลง วัน ชั่วโมง นาที ให้เป็นวินาทีทั้งหมด (ไม่มีหลักวินาที)
+        return (days * 86400) + (hours * 3600) + (mins * 60);
+    } 
+    // เผื่อมีกรณีที่ระบบตัดเลขวันออก เหลือแค่ 2 หลัก (ชั่วโมง:นาที)
+    else if (parts.length === 2) {
+        const hours = parseInt(parts[0] || 0, 10);
+        const mins = parseInt(parts[1] || 0, 10);
+        return (hours * 3600) + (mins * 60);
     }
+    
     return 0;
 }
-
 // --- Helper: Format Seconds to HH:MM:SS ---
 function formatSeconds(totalSeconds) {
     if (isNaN(totalSeconds)) return "00:00:00";
@@ -946,7 +952,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             await transporter.sendMail({
                 from: `"DTC Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
-                subject: `รายงานสรุปพฤติกรรมการขับขี่ (Fleet Safety Report) - ${today}`,
+                subject: `รายงานสรุปพฤติกรรมการขับขี่ กะกลางวัน (06:00 - 18:00) - ${today}`,
                 text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวันกะกลางวัน (06:00 - 18:00)\nช่วงเวลา: ${todayStr} 06:00 ถึง ${todayStr} 18:00\n\nสิ่งที่แนบมาด้วย:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม\n\nด้วยความนับถือ\nDTC Automation Bot`,
  		        attachments: attachments
             });
