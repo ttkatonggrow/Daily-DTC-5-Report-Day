@@ -1,8 +1,9 @@
 /**
  * DTC Automation Script
- * Version: 3.7.0 (Day Shift + Retry Search + Fix Report 5 J Column)
+ * Version: 3.8.0 (Day Shift + GitHub Queue Date Guard)
  * Last Updated: 08/05/2026
  * Changes:
+ * - Pin one Bangkok report date before login and reuse it across GPS, PDF, ZIP and email.
  * - Fix 'file4' scope issue causing Harsh Start data to be missing in PDF
  * - Add validation function `checkValidLicense` to detect valid license plates (Max 3 Retries)
  * - FIX Report 5: Calculate total duration directly from Column J instead of Exit-Enter time
@@ -286,10 +287,94 @@ function processCSV_V3(filePath, config) {
     }
 }
 
-function getTodayFormatted() {
-    const date = new Date();
-    const options = { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Bangkok' };
-    return new Intl.DateTimeFormat('en-CA', options).format(date);
+// --- Freeze the report window before logging in to DTC ---
+const THAI_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+function thaiClock(date) {
+    return new Date(date.getTime() + THAI_OFFSET_MS);
+}
+
+function thaiDayAtSixCutoff(date) {
+    const clock = thaiClock(date);
+    if (clock.getUTCHours() < 6) clock.setUTCDate(clock.getUTCDate() - 1);
+    return clock.toISOString().slice(0, 10);
+}
+
+function validateReportDate(value) {
+    const midnight = new Date(`${value}T00:00:00.000Z`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(midnight.getTime()) ||
+        midnight.toISOString().slice(0, 10) !== value) {
+        throw new Error('REPORT_DATE must be a valid YYYY-MM-DD date.');
+    }
+    return value;
+}
+
+async function getGithubRunCreatedAt(env, fetchRun) {
+    const { GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_API_URL } = env;
+    const token = (env.GH_TOKEN || env.GITHUB_TOKEN || '').trim();
+    if (!token || !/^[\w.-]+\/[\w.-]+$/.test(GITHUB_REPOSITORY || '') ||
+        !/^\d+$/.test(GITHUB_RUN_ID || '')) {
+        throw new Error('GitHub metadata or GH_TOKEN is missing; set GH_TOKEN with actions: read, or supply REPORT_DATE.');
+    }
+    if (typeof fetchRun !== 'function') throw new Error('Use Node.js 18+ to read GitHub run metadata, or supply REPORT_DATE.');
+    const url = new URL(`${(GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '')}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`);
+    if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Invalid GitHub API URL.');
+    const response = await fetchRun(url, {
+        headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}` },
+        redirect: 'error',
+        signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) throw new Error(`GitHub API HTTP ${response.status}; check actions: read or supply REPORT_DATE.`);
+    const run = await response.json();
+    if (String(run.id) !== GITHUB_RUN_ID || run.event !== 'schedule' ||
+        typeof run.created_at !== 'string' || !run.created_at.endsWith('Z') ||
+        !Number.isFinite(Date.parse(run.created_at))) {
+        throw new Error('Invalid scheduled run metadata; supply REPORT_DATE.');
+    }
+    return new Date(run.created_at);
+}
+
+async function resolveReportWindow({ env = process.env, startedAt = new Date(), fetchRun = globalThis.fetch } = {}) {
+    const explicit = (env.REPORT_DATE || '').trim();
+    let reportDate;
+    let source;
+    let createdAt;
+    if (explicit) {
+        reportDate = validateReportDate(explicit);
+        source = 'REPORT_DATE';
+    } else if (env.GITHUB_ACTIONS === 'true') {
+        if (env.GITHUB_EVENT_NAME !== 'schedule') {
+            throw new Error('Manual and other GitHub triggers must supply REPORT_DATE (YYYY-MM-DD).');
+        }
+        createdAt = await getGithubRunCreatedAt(env, fetchRun);
+        const hour = thaiClock(createdAt).getUTCHours();
+        if (hour >= 6 && hour < 18) {
+            throw new Error('GitHub created the run between 06:00 and 17:59 Bangkok time; the target shift is ambiguous. Supply REPORT_DATE.');
+        }
+        reportDate = thaiDayAtSixCutoff(createdAt);
+        source = 'github-run-created-at';
+    } else {
+        reportDate = thaiDayAtSixCutoff(startedAt);
+        source = 'local-06-cutoff';
+    }
+    if (startedAt.getTime() < Date.parse(`${reportDate}T18:00:00+07:00`)) {
+        throw new Error(`Report shift for ${reportDate} has not ended (18:00 Bangkok time).`);
+    }
+    return {
+        reportDate, source, createdAt,
+        startDateTime: `${reportDate} 06:00`,
+        endDateTime: `${reportDate} 18:00`,
+        reportDateLabel: new Intl.DateTimeFormat('th-TH', {
+            year: 'numeric', month: 'long', day: 'numeric', timeZone: 'Asia/Bangkok',
+        }).format(new Date(`${reportDate}T00:00:00+07:00`)),
+    };
+}
+
+function logReportWindow(window, startedAt) {
+    const display = date => `${thaiClock(date).toISOString().slice(0, 19)}+07:00`;
+    console.log(`[Date] Script started: ${display(startedAt)}`);
+    if (window.createdAt) console.log(`[Date] GitHub run created: ${display(window.createdAt)} (not nominal cron time)`);
+    console.log(`[Date] Report window: ${window.startDateTime} to ${window.endDateTime} (Asia/Bangkok; source: ${window.source})`);
 }
 
 function zipFiles(sourceDir, outPath, filesToZip) {
@@ -307,6 +392,18 @@ function zipFiles(sourceDir, outPath, filesToZip) {
 // --- Main Script ---
 
 (async () => {
+    const startedAt = new Date();
+    let reportWindow;
+    try {
+        reportWindow = await resolveReportWindow({ startedAt });
+    } catch (error) {
+        console.error(`[Date] Stopped before GPS login: ${error.message}`);
+        process.exitCode = 1;
+        return;
+    }
+    logReportWindow(reportWindow, startedAt);
+    if (process.argv.includes('--check-report-date')) return;
+    const { startDateTime, endDateTime, reportDateLabel } = reportWindow;
     const { DTC_USERNAME, DTC_PASSWORD, EMAIL_USER, EMAIL_PASS, EMAIL_TO } = process.env;
     if (!DTC_USERNAME || !DTC_PASSWORD) {
         console.error('❌ Error: Missing Secrets.');
@@ -317,7 +414,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation V3.7 (Day Shift With Search Retry Loop & Report 5 Fix)...');
+    console.log('🚀 Starting DTC Automation V3.8 (Day Shift With GitHub Queue Date Guard)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -347,10 +444,6 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         ]);
         console.log('✅ Login Success');
 
-        const todayStr = getTodayFormatted();
-        const startDateTime = `${todayStr} 06:00`;
-        const endDateTime = `${todayStr} 18:00`;
-        console.log(`🕒 Global Time Settings: ${startDateTime} to ${endDateTime}`);
 
         // --- Step 2 to 6: DOWNLOAD REPORTS ---
         
@@ -694,7 +787,6 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             .sort((a, b) => b.time - a.time).slice(0, 5);
 
         // --- HTML GENERATION ---
-        const today = new Date().toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' });
         
         const html = `
         <!DOCTYPE html>
@@ -735,7 +827,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             <div style="text-align: center; padding-top: 60px;">
                 <h1 style="font-size: 48px;">รายงานสรุปพฤติกรรมการขับขี่</h1>
                 <div style="font-size: 24px; color: #64748B;">Fleet Safety & Telematics Analysis Report</div>
-                <div style="margin-top: 20px; font-size: 18px;">ประจำวันที่: ${today}</div>
+                <div style="margin-top: 20px; font-size: 18px;">ประจำวันที่: ${reportDateLabel}</div>
             </div>
 
             <div class="content">
@@ -933,7 +1025,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         const csvsToZip = allFiles.filter(f => f.startsWith('Converted_') && f.endsWith('.csv'));
 
         if (csvsToZip.length > 0 || fs.existsSync(pdfPath)) {
-            const zipName = `DTC_Report_Data_${today.replace(/ /g, '_')}.zip`;
+            const zipName = `DTC_Report_Data_${reportDateLabel.replace(/ /g, '_')}.zip`;
             const zipPath = path.join(downloadPath, zipName);
             
             if(csvsToZip.length > 0) {
@@ -952,8 +1044,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             await transporter.sendMail({
                 from: `"DTC Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
-                subject: `รายงานสรุปพฤติกรรมการขับขี่ กะกลางวัน (06:00 - 18:00) - ${today}`,
-                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวันกะกลางวัน (06:00 - 18:00)\nช่วงเวลา: ${todayStr} 06:00 ถึง ${todayStr} 18:00\n\nสิ่งที่แนบมาด้วย:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม\n\nด้วยความนับถือ\nDTC Automation Bot`,
+                subject: `รายงานสรุปพฤติกรรมการขับขี่ กะกลางวัน (06:00 - 18:00) - ${reportDateLabel}`,
+                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวันกะกลางวัน (06:00 - 18:00)\nช่วงเวลา: ${startDateTime} ถึง ${endDateTime}\n\nสิ่งที่แนบมาด้วย:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม\n\nด้วยความนับถือ\nDTC Automation Bot`,
  		        attachments: attachments
             });
             console.log(`   ✅ Email Sent Successfully!`);
