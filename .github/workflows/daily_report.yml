@@ -1,16 +1,28 @@
-name: Run Daily DTC Report (18:19 PM)
+name: Run Daily DTC Report (18:19 ICT)
 
 on:
   schedule:
-     # 18:19 เวลาไทย (UTC+7) = 11:19 UTC
+    # 18:19 ICT (UTC+7) = 11:19 UTC
     - cron: '19 11 * * *'
-
-  workflow_dispatch: # ปุ่มกดรันเองสำหรับทดสอบ
+  workflow_dispatch:
+    inputs:
+      report_date:
+        description: 'Report date in Bangkok (YYYY-MM-DD)'
+        required: true
+        type: string
+      check_only:
+        description: 'Check the report date only (no GPS login or email)'
+        required: true
+        type: boolean
+        default: true
 
 jobs:
   run-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 60 # ปรับเพิ่มเป็น 60 นาที เผื่อเวลารอโหลดรายงานยาวๆ
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
 
     steps:
       - name: Checkout code
@@ -26,12 +38,20 @@ jobs:
 
       - name: Run Automation Script
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT_DATE: ${{ github.event.inputs.report_date || '' }}
+          CHECK_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.check_only }}
           DTC_USERNAME: ${{ secrets.DTC_USERNAME }}
           DTC_PASSWORD: ${{ secrets.DTC_PASSWORD }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: node index.js
+        run: |
+          if [ "$CHECK_ONLY" = "true" ]; then
+            node index.js --check-report-date
+          else
+            node index.js
+          fi
 
       - name: Upload Artifacts (Reports)
         if: always()
@@ -39,10 +59,11 @@ jobs:
         with:
           name: downloaded-reports
           path: downloads/
+          if-no-files-found: ignore
           retention-days: 1
 
       - name: Upload Debug Screenshots
-        if: always() # ทำงานเสมอ ไม่ว่าจะ Success หรือ Failed
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
